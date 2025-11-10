@@ -1,0 +1,38 @@
+#ifndef TCM_NL_H
+#define TCM_NL_H
+
+#define TCM_GENL_FAMILY_NAME "tcm"
+#define TCM_GENL_MCGRP_NAME "hook"
+#define TCM_GENL_VERSION 1
+
+enum tcm_genl_cmd {
+  TCM_CMD_UNSPEC = 0,
+  TCM_CMD_FORK_EVENT = 1,
+  TCM_CMD_FORK_RET_EVENT = 2,
+  TCM_CMD_FILE_EVENT = 3,
+  __TCM_CMD_MAX,
+};
+#define TCM_CMD_MAX (__TCM_CMD_MAX - 1)
+
+enum tcm_genl_attr {
+  TCM_ATTR_UNSPEC = 0,
+  TCM_ATTR_PARENT_PID = 1,
+  TCM_ATTR_CHILD_PID = 2,
+  TCM_ATTR_PARENT_PATH = 3,
+  TCM_ATTR_CHILD_PATH = 4,
+  TCM_ATTR_FILE_PID = 5,
+  TCM_ATTR_FILE_FD = 6,
+  TCM_ATTR_FILE_PATH = 7,
+  TCM_ATTR_FILE_OPERATION = 8,
+  TCM_ATTR_FILE_BYTES = 9,
+  __TCM_ATTR_MAX,
+};
+#define TCM_ATTR_MAX (__TCM_ATTR_MAX - 1)
+
+enum tcm_genl_mcgrp {
+  TCM_MCGRP,
+  __TCM_MCGRP_MAX,
+};
+#define TCM_MCGRP_MAX (__TCM_MCGRP_MAX - 1)
+
+#endif /* TCM_NL_H */

@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build module",
+            "type": "shell",
+            "command": "bear -- make",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "clean",
+            "type": "shell",
+            "command": "make clean"
+        },
+        {
+            "label": "load module",
+            "type": "shell",
+            "command": "sudo insmod ${workspaceFolder}/module.ko"
+        },
+        {
+            "label": "unload module",
+            "type": "shell",
+            "command": "sudo rmmod module"
+        }
+    ]
+}
