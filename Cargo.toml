@@ -10,10 +10,11 @@ futures = "0.3"
 netlink-packet-core = "0.8"
 netlink-packet-generic = "0.4"
 netlink-proto = { version = "0.12", default-features = false, features = ["tokio_socket"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "io-util", "io-std"] }
 env_logger = "0.11.8"
 log = "0.4.28"
 dotenvy = "0.15.7"
 
 [build-dependencies]
 anyhow = "1.0.100"
+dotenvy = "0.15.7"

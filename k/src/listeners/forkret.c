@@ -17,11 +17,12 @@
 #include <linux/string.h>
 #include <linux/workqueue.h>
 
-#include "tcm/listeners/fork.h"
+#include "tcm/kprobe.h"
+#include "tcm/listeners/forkret.h"
 #include "tcm/netlink/genl.h"
 
 struct fork_ret_listener {
-  struct kretprobe krp;
+  struct tcm_kretprobe_handle *handle;
   fork_ret_event_callback_t callback;
   void *callback_user_data;
 };
@@ -33,7 +34,7 @@ static int fork_ret_handler(struct kretprobe_instance *ri,
     return 0;
   }
 
-  fork_ret_listener_t *listener = container_of(rp, fork_ret_listener_t, krp);
+  fork_ret_listener_t *listener = tcm_kretprobe_get_user_data(rp);
   if (unlikely(!listener)) {
     return 0;
   }
@@ -48,7 +49,7 @@ static int fork_ret_handler(struct kretprobe_instance *ri,
   }
 
   fork_ret_event_t event = {
-      .parent_pid = task_pid_nr(current),
+      .parent_pid = task_tgid_nr(current),
       .child_pid = child_pid,
   };
 
@@ -56,83 +57,68 @@ static int fork_ret_handler(struct kretprobe_instance *ri,
   return 0;
 }
 
-int init_fork_ret_listener(fork_ret_listener_t **listener,
+int fork_ret_listener_init(fork_ret_listener_t **listener,
                            fork_ret_event_callback_t callback,
-                           void *user_data) {
+                           void *callback_user_data) {
   pr_info("%s\n", __func__);
 
   if (!listener) {
-    pr_warn("%s: fork ret listener invalid pointer\n", __func__);
+    pr_warn("%s: listener is NULL\n", __func__);
     return -EINVAL;
   }
 
   if (*listener) {
-    pr_warn("%s: fork ret listener already initialized\n", __func__);
-    return -EALREADY;
+    pr_info("%s: fork ret listener already initialized\n", __func__);
+    return 0;
   }
 
-  *listener = kmalloc(sizeof(fork_ret_listener_t), GFP_KERNEL);
+  *listener = kzalloc(sizeof(fork_ret_listener_t), GFP_KERNEL);
   if (!*listener) {
-    pr_warn("%s: fork ret listener kmalloc failed\n", __func__);
+    pr_warn("%s: failed to kmalloc fork ret listener\n", __func__);
     return -ENOMEM;
   }
 
+  (*listener)->callback_user_data = callback_user_data;
   (*listener)->callback = callback;
-  (*listener)->callback_user_data = user_data;
 
-  static const char *const targets[] = {
-      "kernel_clone",
-      "__do_sys_clone",
-      "__x64_sys_clone",
+  const struct tcm_kretprobe_config config = {
+      .handler = fork_ret_handler,
+      .entry_handler = NULL,
+      .maxactive = 32,
+      .data_size = 0,
+      .user_data = *listener,
   };
-  int ret;
-  size_t i;
 
-  (*listener)->krp.handler = fork_ret_handler;
-  (*listener)->krp.maxactive = 32;
-
-  for (i = 0; i < ARRAY_SIZE(targets); ++i) {
-    (*listener)->krp.kp.symbol_name = targets[i];
-    (*listener)->krp.kp.addr = NULL;
-    ret = register_kretprobe(&(*listener)->krp);
-    if (ret == 0) {
-      pr_info("  %s success, symbol=%s\n", __func__, targets[i]);
-      return 0;
-    } else if (ret == -ENOENT) {
-      pr_info("  %s failed: symbol=%s errno=ENOENT\n", __func__, targets[i]);
+  int ret = tcm_kretprobe_register(TCM_KRETPROBE_TARGET_FORK_CLONE, &config,
+                                   &(*listener)->handle);
+  if (ret) {
+    if (ret == -ENOENT) {
+      pr_err("  %s failed, no suitable symbol found for target %d\n", __func__,
+             TCM_KRETPROBE_TARGET_FORK_CLONE);
     } else {
-      pr_warn("  %s failed: symbol=%s errno=%d\n", __func__, targets[i], ret);
+      pr_err("  %s failed: register_kretprobe error %d\n", __func__, ret);
     }
+    fork_ret_listener_exit(listener);
+    return ret;
   }
 
-  (*listener)->krp.kp.symbol_name = NULL;
-  (*listener)->krp.kp.addr = NULL;
-
-  pr_err("  %s failed, no suitable symbol found\n", __func__);
-  for (i = 0; i < ARRAY_SIZE(targets); ++i) {
-    pr_err("    symbol=%s\n", targets[i]);
-  }
-
-  kfree(*listener);
-  *listener = NULL;
-
-  return -ENOENT;
+  return 0;
 }
 
-void free_fork_ret_listener(fork_ret_listener_t **listener) {
+void fork_ret_listener_exit(fork_ret_listener_t **listener) {
   if (!listener) {
-    pr_warn("%s: fork ret listener invalid pointer\n", __func__);
+    pr_warn("%s: invalid fork ret listener\n", __func__);
     return;
   }
 
   if (!*listener) {
-    pr_warn("%s: fork ret listener already freed\n", __func__);
+    pr_warn("%s: fork ret listener not initialized\n", __func__);
     return;
   }
 
   pr_info("%s\n", __func__);
 
-  unregister_kretprobe(&(*listener)->krp);
+  tcm_kretprobe_unregister(&(*listener)->handle);
 
   (*listener)->callback = NULL;
   (*listener)->callback_user_data = NULL;

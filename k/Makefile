@@ -1,10 +1,13 @@
 obj-m += tcm.o
 
 tcm-y := src/main.o \
+	src/kprobe.o \
 	src/netlink/genl.o \
 	src/listeners/fork.o \
 	src/listeners/forkret.o \
-	src/listeners/file.o
+	src/listeners/file.o \
+	src/listeners/exit.o \
+	src/whitelist/pid.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 MO ?= $(CURDIR)/build

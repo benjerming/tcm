@@ -1,8 +1,8 @@
 #ifndef TCM_NETLINK_GENL_H
 #define TCM_NETLINK_GENL_H
 
-#include <linux/types.h>
 #include <linux/limits.h>
+#include <linux/types.h>
 
 typedef struct {
   pid_t parent_pid;
@@ -27,16 +27,24 @@ typedef struct {
   pid_t pid;
   int fd;
   file_event_type_t operation;
-  u64 bytes;
   char path[PATH_MAX];
 } file_event_t;
 
-typedef struct genl_core genl_core_t;
-int init_genl_core(genl_core_t **gc);
-void free_genl_core(genl_core_t **gc);
+typedef struct {
+  pid_t pid;
+  s32 code;
+} exit_event_t;
 
-int genl_core_send_fork_event(genl_core_t *gc, const fork_event_t *event);
-int genl_core_send_fork_ret_event(genl_core_t *gc, const fork_ret_event_t *event);
-int genl_core_send_file_event(genl_core_t *gc, const file_event_t *event);
+struct file_listener;
+
+typedef struct genl_core genl_core_t;
+int genl_core_init(genl_core_t **core);
+void genl_core_exit(genl_core_t **core);
+int genl_core_set_file_listener(genl_core_t *core, struct file_listener *listener);
+
+void genl_core_on_exit_event(const exit_event_t *event, void *user_data);
+void genl_core_on_file_event(const file_event_t *event, void *user_data);
+void genl_core_on_fork_ret_event(const fork_ret_event_t *event,
+                                 void *user_data);
 
 #endif /* TCM_NETLINK_GENL_H */

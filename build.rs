@@ -78,8 +78,11 @@ fn lauch_k() -> Result<()> {
     match env::var("AUTO_LAUNCH_TCM") {
         Ok(v) => {
             let v = v.to_lowercase();
-            if !matches!(v.as_str(), "true" | "1") {
-                println!("AUTO_LAUNCH_TCM={v}, is not 'true' or '1', disabled");
+            if !matches!(
+                v.as_str(),
+                "true" | "1" | "yes" | "y" | "on" | "enable" | "enabled"
+            ) {
+                println!("AUTO_LAUNCH_TCM={v}, isn't enabled");
                 return Ok(());
             }
             println!("AUTO_LAUNCH_TCM={v}, enabled");
@@ -102,6 +105,7 @@ fn lauch_k() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     lauch_k()?;
     Ok(())
 }

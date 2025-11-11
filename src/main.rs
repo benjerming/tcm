@@ -1,49 +1,44 @@
+mod netlink;
 mod tcm;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
-use futures::StreamExt;
-use genetlink::message::{RawGenlMessage, map_from_rawgenlmsg};
 use genetlink::new_connection;
 use log::{debug, error, info, warn};
-use netlink_packet_core::{NLM_F_REQUEST, NetlinkHeader, NetlinkMessage, NetlinkPayload};
-use netlink_packet_generic::{
-    GenlMessage,
-    ctrl::{
-        GenlCtrl, GenlCtrlCmd,
-        nlas::{GenlCtrlAttrs, McastGrpAttrs},
-    },
-};
 use netlink_proto::sys::AsyncSocket;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout};
 use tokio::signal;
 
+use crate::netlink::{TcmGenlBroadcastListener, TcmGenlClient, resolve_family_info};
 use crate::tcm::{
-    TCM_FAMILY_NAME, TCM_FAMILY_VERSION, TCM_MCGRP_NAME, TcmCmd, TcmFileEvent, TcmFileOp,
-    TcmForkEvent, TcmForkRetEvent, TcmMessage,
+    TCM_GENL_FAMILY_NAME, TCM_GENL_FAMILY_VERSION, TCM_GENL_MCGRP_NAME, TcmEventHandler,
+    TcmExitEvent, TcmFileEvent, TcmFileStats, TcmForkRetEvent, TcmMessage, handle_raw_message,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcmFamilyInfo {
-    pub family_id: u16,
-    pub gid: u32,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init_from_env(env_logger::Env::default().filter_or("RUST_LOG", "debug"));
+    dotenvy::dotenv().ok();
+    env_logger::init();
 
     info!("resolving family info for TCM");
-    let family = resolve_family_info(TCM_FAMILY_NAME, TCM_FAMILY_VERSION, TCM_MCGRP_NAME).await?;
+    let family: crate::netlink::TcmFamilyInfo = resolve_family_info(
+        TCM_GENL_FAMILY_NAME,
+        TCM_GENL_FAMILY_VERSION,
+        TCM_GENL_MCGRP_NAME,
+    )
+    .await?;
     debug!("  resolved family info: {family:?}");
 
-    let (mut conn, handle, mut messages) =
+    let (mut conn, handle, receiver) =
         new_connection().context("failed to create generic netlink connection")?;
 
-    info!("joining multicast group {TCM_MCGRP_NAME}");
+    info!("joining multicast group {TCM_GENL_MCGRP_NAME}");
     conn.socket_mut()
         .socket_mut()
         .add_membership(family.gid)
-        .with_context(|| format!("failed to join multicast group {TCM_MCGRP_NAME}"))?;
-    debug!("  joined multicast group {TCM_MCGRP_NAME}");
+        .with_context(|| format!("failed to join multicast group {TCM_GENL_MCGRP_NAME}"))?;
+    debug!("  joined multicast group {TCM_GENL_MCGRP_NAME}");
 
     let conn_task = tokio::spawn(async move {
         info!("tokio spawn: receiving netlink messages");
@@ -68,26 +63,95 @@ async fn main() -> Result<()> {
     }
 
     info!("ready: family info: {family:?}");
-    info!("waiting for fork events (press Ctrl+C to exit)...");
+
+    let handler: Arc<dyn TcmEventHandler> = Arc::new(LoggingEventHandler);
+    let listener = TcmGenlBroadcastListener::spawn(receiver, {
+        let handler = Arc::clone(&handler);
+        move |msg| {
+            handle_raw_message(msg, handler.as_ref());
+        }
+    });
+    info!("kernel broadcast listener initialized (开启监听，但默认禁用回调)");
+
+    let mut client = TcmGenlClient::new(handle, family.family_id);
+    let mut stdin = BufReader::new(stdin());
+    let mut stdout = stdout();
+    let mut input = String::new();
 
     loop {
-        tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("CTRL + C received, shutting down...");
-                break;
-            }
-            message = messages.next() => {
-                match message {
-                    Some((msg, _addr)) => on_raw_message(msg),
-                    None => {
-                        info!("netlink connection closed by kernel");
-                        break;
+        stdout.write_all("\n".as_bytes()).await?;
+        stdout.write_all("请选择工作模式:\n".as_bytes()).await?;
+        stdout.write_all("1. 获取内核状态\n".as_bytes()).await?;
+        stdout
+            .write_all("2. 接收内核事件 (Ctrl+C 返回菜单)\n".as_bytes())
+            .await?;
+        stdout.write_all("q. 退出程序\n".as_bytes()).await?;
+        stdout.write_all("> ".as_bytes()).await?;
+        stdout.flush().await?;
+
+        input.clear();
+        let bytes = stdin.read_line(&mut input).await?;
+        if bytes == 0 {
+            info!("标准输入已关闭，准备退出");
+            break;
+        }
+
+        match input.trim() {
+            "1" => {
+                info!("requesting file listener stats via Generic Netlink");
+                match client.request_file_stats().await {
+                    Ok(stats) => {
+                        info!("received on-demand file stats response");
+                        handler.on_file_stats(stats);
+                    }
+                    Err(err) => {
+                        warn!("failed to request file stats: {err:?}");
                     }
                 }
+            }
+            "2" => {
+                listener.enable();
+                stdout
+                    .write_all("\n开始接收内核广播，按 Ctrl+C 返回菜单...\n".as_bytes())
+                    .await?;
+                stdout.flush().await?;
+
+                match signal::ctrl_c().await {
+                    Ok(()) => {
+                        info!("CTRL + C received, returning to menu");
+                        stdout
+                            .write_all("\n已退出广播模式，返回菜单。\n".as_bytes())
+                            .await?;
+                        stdout.flush().await?;
+                    }
+                    Err(err) => {
+                        warn!("failed to listen for Ctrl+C: {err:?}");
+                        stdout
+                            .write_all("\n监听 Ctrl+C 失败，返回菜单。\n".as_bytes())
+                            .await?;
+                        stdout.flush().await?;
+                    }
+                }
+
+                listener.disable();
+            }
+            "q" | "Q" => {
+                info!("用户选择退出程序");
+                break;
+            }
+            "" => {
+                continue;
+            }
+            _ => {
+                stdout
+                    .write_all("无效的选择，请重新输入。\n".as_bytes())
+                    .await?;
+                stdout.flush().await?;
             }
         }
     }
 
+    listener.shutdown().await;
     conn_task.abort();
     let _ = conn_task.await;
 
@@ -95,177 +159,40 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn on_genl_message(genlmsg: GenlMessage<TcmMessage>) {
-    match genlmsg.payload.cmd {
-        TcmCmd::ForkEvent => match TcmForkEvent::try_from(genlmsg) {
-            Ok(event) => on_fork_event(event),
-            Err(err) => {
-                warn!("failed to decode fork event: {err:?}");
-            }
-        },
-        TcmCmd::ForkRetEvent => match TcmForkRetEvent::try_from(genlmsg) {
-            Ok(event) => on_fork_ret_event(event),
-            Err(err) => {
-                warn!("failed to decode fork ret event: {err:?}");
-            }
-        },
-        TcmCmd::FileEvent => match TcmFileEvent::try_from(genlmsg) {
-            Ok(event) => on_file_event(event),
-            Err(err) => {
-                warn!("failed to decode file event: {err:?}");
-            }
-        },
+struct LoggingEventHandler;
+
+impl TcmEventHandler for LoggingEventHandler {
+    fn on_fork_ret(&self, event: TcmForkRetEvent) {
+        info!("{event:?}");
     }
-}
 
-fn on_netlink_payload(payload: NetlinkPayload<GenlMessage<TcmMessage>>) {
-    match payload {
-        NetlinkPayload::InnerMessage(genlmsg) => on_genl_message(genlmsg),
-        NetlinkPayload::Error(err) => {
-            warn!("received netlink error: {err:?}");
-        }
-        other => {
-            warn!("ignoring non data payload: {other:?}");
-        }
+    fn on_file(&self, event: TcmFileEvent) {
+        info!("{event:?}");
     }
-}
 
-fn on_netlink_message(decoded: NetlinkMessage<GenlMessage<TcmMessage>>) {
-    on_netlink_payload(decoded.payload)
-}
-
-fn on_raw_message(msg: NetlinkMessage<RawGenlMessage>) {
-    match map_from_rawgenlmsg::<TcmMessage>(msg) {
-        Ok(decoded) => on_netlink_message(decoded),
-        Err(err) => {
-            warn!("failed to decode message: {err:?}");
-        }
+    fn on_exit(&self, event: TcmExitEvent) {
+        info!("{event:?}");
     }
-}
 
-fn on_fork_event(event: TcmForkEvent) {
-    info!("{event:?}");
-}
+    fn on_file_stats(&self, event: TcmFileStats) {
+        info!(
+            "file stats: pid_table_size={} pid_entries={} file_entries={} top_pid_count={}",
+            event.pid_table_size,
+            event.pid_entry_count,
+            event.file_entry_count,
+            event.top_pid_count
+        );
 
-fn on_fork_ret_event(event: TcmForkRetEvent) {
-    info!("{event:?}");
-}
-
-fn on_file_event(event: TcmFileEvent) {
-    let op = match event.operation {
-        TcmFileOp::Open => "open",
-        TcmFileOp::Write => "write",
-        TcmFileOp::Close => "close",
-    };
-
-    info!(
-        "file {op}: pid={} fd={} bytes={} path={}",
-        event.pid, event.fd, event.bytes, event.path
-    );
-}
-
-async fn resolve_family_info(
-    family_name: &str,
-    version: u8,
-    mcgrp_name: &str,
-) -> Result<TcmFamilyInfo> {
-    let (conn, mut handle, messages) =
-        new_connection().context("failed to open netlink connection for discovery")?;
-    drop(messages);
-
-    let conn_task = tokio::spawn(async move {
-        conn.await;
-    });
-
-    let message = {
-        let header = {
-            let mut header = NetlinkHeader::default();
-            header.flags = NLM_F_REQUEST;
-            header
-        };
-
-        let payload = GenlMessage::from_payload(GenlCtrl {
-            cmd: GenlCtrlCmd::GetFamily,
-            nlas: vec![
-                GenlCtrlAttrs::FamilyName(family_name.to_owned()),
-                GenlCtrlAttrs::Version(version as u32),
-            ],
-        });
-
-        let mut msg = NetlinkMessage::new(header, payload.into());
-        msg.finalize();
-        msg
-    };
-
-    let query_result = async {
-        let mut responses = handle
-            .request(message)
-            .await
-            .context(format!("failed to request family info for family={family_name} and version={version}"))?;
-
-        let mut family_id: Option<u16> = None;
-        let mut gid: Option<u32> = None;
-
-        while let Some(response) = responses.next().await {
-            let packet = response.context("failed to decode discovery response")?;
-            match packet.payload {
-                NetlinkPayload::InnerMessage(genlmsg) => {
-                    if !matches!(
-                        genlmsg.payload.cmd,
-                        GenlCtrlCmd::GetFamily | GenlCtrlCmd::NewFamily
-                    ) {
-                        continue;
-                    }
-
-                    for nlas in genlmsg.payload.nlas {
-                        match nlas {
-                            GenlCtrlAttrs::FamilyId(id) => family_id = Some(id),
-                            GenlCtrlAttrs::McastGroups(groups) => {
-                                for group in groups {
-                                    let mut name: Option<String> = None;
-                                    let mut id: Option<u32> = None;
-                                    for attr in group {
-                                        match attr {
-                                            McastGrpAttrs::Name(n) => name = Some(n),
-                                            McastGrpAttrs::Id(v) => id = Some(v),
-                                        }
-                                    }
-
-                                    if matches!(name, Some(n) if n == mcgrp_name) {
-                                        if let Some(group_id) = id {
-                                            gid = Some(group_id);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                NetlinkPayload::Error(err) => {
-                    return Err(anyhow::anyhow!(
-                        "netlink payload error while resolving family: {err:?}"
-                    ));
-                }
-                _ => {}
-            }
+        if event.top_pids.is_empty() {
+            info!("  no processes tracked");
+            return;
         }
 
-        let family_id = family_id.context(format!(
-            "missing family id in response for family={family_name} and version={version}"
-        ))?;
-        let gid = gid.context(format!(
-            "missing multicast group id in response for family={family_name} and version={version} and group={mcgrp_name}"
-        ))?;
-
-        Ok((family_id, gid))
+        for (idx, stat) in event.top_pids.iter().enumerate() {
+            info!(
+                "  top #{idx}: pid={} file_count={}",
+                stat.pid, stat.file_count
+            );
+        }
     }
-    .await;
-
-    conn_task.abort();
-    let _ = conn_task.await;
-
-    let (family_id, gid) = query_result?;
-
-    Ok(TcmFamilyInfo { family_id, gid })
 }
