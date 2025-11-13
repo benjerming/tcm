@@ -1,8 +1,9 @@
 #ifndef TCM_LISTENERS_EXIT_H
 #define TCM_LISTENERS_EXIT_H
 
-#include "tcm/netlink/genl.h"
+#include "tcm/api.h"
 
+/* 退出事件回调类型：向上层报告 PID 与退出码。 */
 typedef void (*exit_event_callback_t)(const exit_event_t *event,
                                       void *user_data);
 typedef struct exit_listener exit_listener_t;

@@ -7,6 +7,13 @@
 
 #include "tcm/whitelist/pid.h"
 
+/*
+ * PID 白名单：
+ *  - 通过 module_param 提供用户态配置接口
+ *  - 使用读写锁保护 pid 列表
+ *  - 支持在运行时追加单个 PID 或批量更新
+ */
+
 #define PID_WHITELIST_MAX 128
 #define PID_WHITELIST_PARAM_LEN 512
 
@@ -15,6 +22,7 @@ static pid_t pid_whitelist[PID_WHITELIST_MAX];
 static size_t pid_whitelist_count;
 static char pid_whitelist_raw[PID_WHITELIST_PARAM_LEN];
 
+/* 将 PID 列表格式化为逗号分隔字符串，方便 module_param 导出。 */
 static void format_pid_whitelist_string(const pid_t *pids, size_t count,
                                         char *out, size_t outlen) {
   size_t offset = 0;
@@ -40,6 +48,7 @@ static void format_pid_whitelist_string(const pid_t *pids, size_t count,
   }
 }
 
+/* 解析用户输入的 PID 列表，自动去重并限制数量。 */
 static int parse_pid_list(char *input, pid_t *out, size_t max, size_t *count) {
   char *cursor;
   char *token;
@@ -51,6 +60,7 @@ static int parse_pid_list(char *input, pid_t *out, size_t max, size_t *count) {
 
   cursor = input;
 
+  /* 使用 strsep 逐项解析，同时去除空段与重复值。 */
   while ((token = strsep(&cursor, ", \t")) != NULL) {
     long value;
     int ret;
@@ -92,6 +102,7 @@ static int parse_pid_list(char *input, pid_t *out, size_t max, size_t *count) {
   return 0;
 }
 
+/* 追加单个 PID 到白名单，重复时返回 -EEXIST。 */
 int pid_whitelist_add(pid_t pid) {
   bool added = false;
   size_t i;
@@ -134,6 +145,7 @@ out_unlock:
   return ret;
 }
 
+/* 查询指定 PID 是否在白名单中。 */
 bool pid_whitelist_contains(pid_t pid) {
   size_t i;
   bool found = false;
@@ -150,6 +162,7 @@ bool pid_whitelist_contains(pid_t pid) {
   return found;
 }
 
+/* module_param 的 set 回调：支持一次性覆盖白名单。 */
 static int pid_whitelist_param_set(const char *val,
                                    const struct kernel_param *kp) {
   char buf[PID_WHITELIST_PARAM_LEN];
@@ -166,11 +179,13 @@ static int pid_whitelist_param_set(const char *val,
   strscpy(buf, val, sizeof(buf));
   trimmed = strim(buf);
 
+  /* 将字符串解析为 PID 数组，自动去重并校验范围。 */
   ret = parse_pid_list(trimmed, parsed, PID_WHITELIST_MAX, &count);
   if (ret) {
     return ret;
   }
 
+  /* 在写锁保护下用新列表覆盖现有白名单。 */
   write_lock(&whitelist_pid_lock);
   pid_whitelist_count = count;
   if (count > 0) {
@@ -194,6 +209,7 @@ static int pid_whitelist_param_set(const char *val,
   return 0;
 }
 
+/* module_param 的 get 回调：以字符串形式导出当前列表。 */
 static int pid_whitelist_param_get(char *buffer,
                                    const struct kernel_param *kp) {
   int len;

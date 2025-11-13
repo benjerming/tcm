@@ -10,12 +10,19 @@
 #include "tcm/kprobe.h"
 #include "tcm/listeners/exit.h"
 
+/*
+ * 退出事件监听器：
+ *  - 通过 kprobe 挂钩 do_exit，捕获进程退出信息
+ *  - 将 PID 与退出码回调给上层，用于清理资源或统计
+ */
+
 struct exit_listener {
   struct tcm_kprobe_handle *handle;
   exit_event_callback_t callback;
   void *callback_user_data;
 };
 
+/* kprobe 回调：确保仅在线程组长退出时上报事件。 */
 static int exit_kprobe_pre_handler(struct kprobe *kp, struct pt_regs *regs) {
   exit_listener_t *listener;
   exit_event_t event;
@@ -33,13 +40,14 @@ static int exit_kprobe_pre_handler(struct kprobe *kp, struct pt_regs *regs) {
     return 0;
   }
 
-  event.pid = task_tgid_nr(current);
+  event.pid = (s32)task_tgid_nr(current);
   event.code = (s32)regs->di;
 
   listener->callback(&event, listener->callback_user_data);
   return 0;
 }
 
+/* 初始化退出监听器并注册 do_exit kprobe。 */
 int exit_listener_init(exit_listener_t **listener,
                        exit_event_callback_t callback,
                        void *callback_user_data) {
@@ -80,6 +88,7 @@ int exit_listener_init(exit_listener_t **listener,
   return 0;
 }
 
+/* 注销监听器并释放资源。 */
 void exit_listener_exit(exit_listener_t **listener) {
   if (!listener) {
     pr_warn("%s: invalid exit listener\n", __func__);

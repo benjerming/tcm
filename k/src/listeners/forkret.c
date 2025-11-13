@@ -19,7 +19,12 @@
 
 #include "tcm/kprobe.h"
 #include "tcm/listeners/forkret.h"
-#include "tcm/netlink/genl.h"
+
+/*
+ * fork/clone 返回事件监听器：
+ *  - 通过 kretprobe 捕获 kernel_clone/clone 的返回值
+ *  - 将父子进程 PID 组合上报给上层
+ */
 
 struct fork_ret_listener {
   struct tcm_kretprobe_handle *handle;
@@ -27,6 +32,7 @@ struct fork_ret_listener {
   void *callback_user_data;
 };
 
+/* kretprobe handler：当 clone 成功返回时生成事件。 */
 static int fork_ret_handler(struct kretprobe_instance *ri,
                             struct pt_regs *regs) {
   struct kretprobe *rp = get_kretprobe(ri);
@@ -49,14 +55,15 @@ static int fork_ret_handler(struct kretprobe_instance *ri,
   }
 
   fork_ret_event_t event = {
-      .parent_pid = task_tgid_nr(current),
-      .child_pid = child_pid,
+      .parent_pid = (s32)task_tgid_nr(current),
+      .child_pid = (s32)child_pid,
   };
 
   listener->callback(&event, listener->callback_user_data);
   return 0;
 }
 
+/* 初始化 fork 返回监听器并注册对应 kretprobe。 */
 int fork_ret_listener_init(fork_ret_listener_t **listener,
                            fork_ret_event_callback_t callback,
                            void *callback_user_data) {
@@ -105,6 +112,7 @@ int fork_ret_listener_init(fork_ret_listener_t **listener,
   return 0;
 }
 
+/* 注销 fork 返回监听器。 */
 void fork_ret_listener_exit(fork_ret_listener_t **listener) {
   if (!listener) {
     pr_warn("%s: invalid fork ret listener\n", __func__);

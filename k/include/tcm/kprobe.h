@@ -7,12 +7,14 @@
 struct tcm_kprobe_handle;
 struct tcm_kretprobe_handle;
 
+/* kprobe 配置结构体，封装预处理/后处理回调及用户数据指针。 */
 struct tcm_kprobe_config {
   kprobe_pre_handler_t pre_handler;
   kprobe_post_handler_t post_handler;
   void *user_data;
 };
 
+/* kretprobe 配置结构体，关注函数返回场景。 */
 struct tcm_kretprobe_config {
   kretprobe_handler_t handler;
   kretprobe_handler_t entry_handler;
@@ -21,6 +23,7 @@ struct tcm_kretprobe_config {
   void *user_data;
 };
 
+/* 枚举所有支持的 kprobe 目标，保持与目标表一一对应。 */
 enum tcm_kprobe_target {
   TCM_KPROBE_TARGET_FILE_WRITE = 0,
   TCM_KPROBE_TARGET_FILE_CLOSE,
@@ -28,6 +31,7 @@ enum tcm_kprobe_target {
   TCM_KPROBE_TARGET_COUNT,
 };
 
+/* 枚举所有支持的 kretprobe 目标。 */
 enum tcm_kretprobe_target {
   TCM_KRETPROBE_TARGET_FILE_OPEN = 0,
   TCM_KRETPROBE_TARGET_FORK_CLONE,

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::env::{self, VarError};
 use std::path::PathBuf;
 use std::process::Command;
@@ -6,6 +6,26 @@ use std::process::Command;
 const K_DIR: &str = "k";
 const KO_STEM: &str = "tcm";
 const KO_NAME: &str = "tcm.ko";
+
+fn generate_bindings() -> Result<()> {
+    let header = PathBuf::from("k/api/include/tcm/api.h");
+    println!("cargo:rerun-if-changed={}", header.display());
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let bindings = bindgen::Builder::default()
+        .header(header.to_string_lossy())
+        .allowlist_type("tcm_genl_.*")
+        .allowlist_var("TCM_GENL_.*")
+        .default_enum_style(bindgen::EnumVariation::ModuleConsts)
+        .generate()
+        .map_err(|_| anyhow!("failed to generate bindings from {}", header.display()))?;
+
+    bindings
+        .write_to_file(out_dir.join("tcm_api.rs"))
+        .context("failed to write generated bindings")?;
+
+    Ok(())
+}
 
 fn kmod_setup() -> Result<PathBuf> {
     let k = env::current_dir()
@@ -106,6 +126,7 @@ fn lauch_k() -> Result<()> {
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
+    generate_bindings()?;
     lauch_k()?;
     Ok(())
 }

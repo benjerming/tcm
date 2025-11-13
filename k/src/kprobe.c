@@ -4,12 +4,16 @@
 
 #include "tcm/kprobe.h"
 
+/* 内核态 kprobe/kretprobe 适配层，统一管理目标符号的注册与销毁。 */
+
+/* kprobe 句柄封装：保存注册状态与业务侧的用户数据指针。 */
 struct tcm_kprobe_handle {
   struct kprobe kp;
   bool registered;
   void *user_data;
 };
 
+/* kretprobe 句柄封装：在函数返回时触发回调。 */
 struct tcm_kretprobe_handle {
   struct kretprobe krp;
   bool registered;
@@ -26,6 +30,7 @@ struct tcm_kretprobe_target_info {
   size_t count;
 };
 
+/* 各类内核符号备选表，便于在不同内核版本上选择可用符号。 */
 static const char *const tcm_kprobe_file_write_targets[] = {
     "__x64_sys_write",
     "ksys_write",
@@ -40,6 +45,7 @@ static const char *const tcm_kprobe_do_exit_targets[] = {
     "do_exit",
 };
 
+/* 针对每种 kprobe 目标提供候选符号列表。 */
 static const struct tcm_kprobe_target_info
     tcm_kprobe_target_table[TCM_KPROBE_TARGET_COUNT] = {
         [TCM_KPROBE_TARGET_FILE_WRITE] =
@@ -72,6 +78,7 @@ static const char *const tcm_kretprobe_fork_clone_targets[] = {
     "__x64_sys_clone",
 };
 
+/* 针对每种 kretprobe 目标提供候选符号列表。 */
 static const struct tcm_kretprobe_target_info
     tcm_kretprobe_target_table[TCM_KRETPROBE_TARGET_COUNT] = {
         [TCM_KRETPROBE_TARGET_FILE_OPEN] =
@@ -86,6 +93,7 @@ static const struct tcm_kretprobe_target_info
             },
 };
 
+/* 尝试按优先级逐个注册候选符号，直到成功或全部失败。 */
 static int
 tcm_kprobe_register_targets_internal(struct tcm_kprobe_handle *handle,
                                      const char *const *targets,
@@ -172,6 +180,7 @@ int tcm_kprobe_register(enum tcm_kprobe_target target,
     return -ENOMEM;
   }
 
+  /* 将外部传入的回调和上下文写入内核结构体。 */
   value->kp.pre_handler = config->pre_handler;
   value->kp.post_handler = config->post_handler;
   value->user_data = config->user_data;
@@ -186,6 +195,7 @@ int tcm_kprobe_register(enum tcm_kprobe_target target,
   return 0;
 }
 
+/* 注销已注册的 kprobe，释放句柄并清空回调。 */
 void tcm_kprobe_unregister(struct tcm_kprobe_handle **handle) {
   struct tcm_kprobe_handle *value;
 
@@ -210,6 +220,7 @@ void tcm_kprobe_unregister(struct tcm_kprobe_handle **handle) {
   *handle = NULL;
 }
 
+/* 通过 kprobe 回调提供的指针反查业务层存放的 user_data。 */
 void *tcm_kprobe_get_user_data(const struct kprobe *kp) {
   struct tcm_kprobe_handle *handle;
 
@@ -221,6 +232,7 @@ void *tcm_kprobe_get_user_data(const struct kprobe *kp) {
   return handle->user_data;
 }
 
+/* kretprobe 注册逻辑与 kprobe 类似，区别在于使用 kretprobe 结构。 */
 static int tcm_kretprobe_register_targets_internal(
     struct tcm_kretprobe_handle *handle,
     const struct tcm_kretprobe_config *config, const char *const *targets,
@@ -328,6 +340,7 @@ int tcm_kretprobe_register(enum tcm_kretprobe_target target,
     return -ENOMEM;
   }
 
+  /* 保存外部上下文，便于 handler 中访问业务数据。 */
   value->user_data = config->user_data;
 
   ret = tcm_kretprobe_register_targets_internal(value, config, info->targets,
@@ -341,6 +354,7 @@ int tcm_kretprobe_register(enum tcm_kretprobe_target target,
   return 0;
 }
 
+/* 注销 kretprobe 并清理所有状态，避免悬挂引用。 */
 void tcm_kretprobe_unregister(struct tcm_kretprobe_handle **handle) {
   struct tcm_kretprobe_handle *value;
 
@@ -367,6 +381,7 @@ void tcm_kretprobe_unregister(struct tcm_kretprobe_handle **handle) {
   *handle = NULL;
 }
 
+/* kretprobe 版本的 user_data 获取函数。 */
 void *tcm_kretprobe_get_user_data(const struct kretprobe *krp) {
   struct tcm_kretprobe_handle *handle;
 

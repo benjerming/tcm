@@ -18,3 +18,4 @@ dotenvy = "0.15.7"
 [build-dependencies]
 anyhow = "1.0.100"
 dotenvy = "0.15.7"
+bindgen = "0.69"

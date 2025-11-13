@@ -1,8 +1,9 @@
 #ifndef TCM_LISTENERS_FORK_H
 #define TCM_LISTENERS_FORK_H
 
-#include "tcm/netlink/genl.h"
+#include "tcm/api.h"
 
+/* fork/clone 结束事件的回调签名。 */
 typedef void (*fork_ret_event_callback_t)(const fork_ret_event_t *event,
                                           void *user_data);
 typedef struct fork_ret_listener fork_ret_listener_t;

@@ -7,7 +7,8 @@ tcm-y := src/main.o \
 	src/listeners/forkret.o \
 	src/listeners/file.o \
 	src/listeners/exit.o \
-	src/whitelist/pid.o
+	src/whitelist/pid.o \
+	src/whitelist/file.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 MO ?= $(CURDIR)/build

@@ -4,7 +4,8 @@ use netlink_packet_core::DecodeError;
 
 use super::constants::{
     TCM_GENL_CMD_EXIT_EVENT, TCM_GENL_CMD_FILE_EVENT, TCM_GENL_CMD_FILE_STATS_EVENT,
-    TCM_GENL_CMD_FORK_RET_EVENT, TCM_GENL_OP_GET_FILE_STATS, TCM_GENL_OP_REGISTER,
+    TCM_GENL_CMD_FORK_RET_EVENT, TCM_GENL_OP_FILE_WHITELIST_ADD, TCM_GENL_OP_FILE_WHITELIST_REMOVE,
+    TCM_GENL_OP_GET_FILE_STATS, TCM_GENL_OP_REGISTER,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,16 +44,36 @@ impl TryFrom<u8> for TcmEventCmd {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TcmOp {
+pub enum TcmOperateCmd {
     Register,
     GetFileStats,
+    FileWhitelistAdd,
+    FileWhitelistRemove,
 }
 
-impl From<TcmOp> for u8 {
-    fn from(op: TcmOp) -> u8 {
+impl From<TcmOperateCmd> for u8 {
+    fn from(op: TcmOperateCmd) -> u8 {
         match op {
-            TcmOp::Register => TCM_GENL_OP_REGISTER,
-            TcmOp::GetFileStats => TCM_GENL_OP_GET_FILE_STATS,
+            TcmOperateCmd::Register => TCM_GENL_OP_REGISTER,
+            TcmOperateCmd::GetFileStats => TCM_GENL_OP_GET_FILE_STATS,
+            TcmOperateCmd::FileWhitelistAdd => TCM_GENL_OP_FILE_WHITELIST_ADD,
+            TcmOperateCmd::FileWhitelistRemove => TCM_GENL_OP_FILE_WHITELIST_REMOVE,
+        }
+    }
+}
+
+impl TryFrom<u8> for TcmOperateCmd {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            TCM_GENL_OP_REGISTER => Ok(TcmOperateCmd::Register),
+            TCM_GENL_OP_GET_FILE_STATS => Ok(TcmOperateCmd::GetFileStats),
+            TCM_GENL_OP_FILE_WHITELIST_ADD => Ok(TcmOperateCmd::FileWhitelistAdd),
+            TCM_GENL_OP_FILE_WHITELIST_REMOVE => Ok(TcmOperateCmd::FileWhitelistRemove),
+            other => Err(DecodeError::from(format!(
+                "unknown TCM operation command: {other}"
+            ))),
         }
     }
 }
@@ -60,7 +81,7 @@ impl From<TcmOp> for u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcmCommand {
     Event(TcmEventCmd),
-    Operation(TcmOp),
+    Operation(TcmOperateCmd),
 }
 
 impl From<TcmCommand> for u8 {
@@ -76,14 +97,20 @@ impl TryFrom<u8> for TcmCommand {
     type Error = DecodeError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if let Ok(event) = TcmEventCmd::try_from(value) {
-            return Ok(TcmCommand::Event(event));
-        }
-
         match value {
-            TCM_GENL_OP_REGISTER => Ok(TcmCommand::Operation(TcmOp::Register)),
-            TCM_GENL_OP_GET_FILE_STATS => Ok(TcmCommand::Operation(TcmOp::GetFileStats)),
-            other => Err(DecodeError::from(format!("unknown TCM command: {other}"))),
+            TCM_GENL_OP_REGISTER => Ok(TcmCommand::Operation(TcmOperateCmd::Register)),
+            TCM_GENL_OP_GET_FILE_STATS => Ok(TcmCommand::Operation(TcmOperateCmd::GetFileStats)),
+            TCM_GENL_OP_FILE_WHITELIST_ADD => {
+                Ok(TcmCommand::Operation(TcmOperateCmd::FileWhitelistAdd))
+            }
+            TCM_GENL_OP_FILE_WHITELIST_REMOVE => {
+                Ok(TcmCommand::Operation(TcmOperateCmd::FileWhitelistRemove))
+            }
+            TCM_GENL_CMD_FORK_RET_EVENT => Ok(TcmCommand::Event(TcmEventCmd::ForkRetEvent)),
+            TCM_GENL_CMD_FILE_EVENT => Ok(TcmCommand::Event(TcmEventCmd::FileEvent)),
+            TCM_GENL_CMD_EXIT_EVENT => Ok(TcmCommand::Event(TcmEventCmd::ExitEvent)),
+            TCM_GENL_CMD_FILE_STATS_EVENT => Ok(TcmCommand::Event(TcmEventCmd::FileStatsEvent)),
+            _ => Err(DecodeError::from(format!("unknown TCM command: {value}"))),
         }
     }
 }

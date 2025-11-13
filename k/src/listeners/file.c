@@ -19,18 +19,28 @@
 #include "tcm/common.h"
 #include "tcm/kprobe.h"
 #include "tcm/listeners/file.h"
+#include "tcm/whitelist/file.h"
 #include "tcm/whitelist/pid.h"
+
+/*
+ * 文件事件监听器：
+ *  - 通过 kprobe/kretprobe 捕获 open/write/close/exit 等关键调用
+ *  - 使用延迟工作队列解析路径并过滤白名单
+ *  - 利用哈希表记录“首次看到”的文件，避免同一进程重复上报
+ */
 
 #define FILE_FIRST_SEEN_PID_HASH_BITS 8
 #define FILE_FIRST_SEEN_FILE_HASH_BITS 8
 
+/* 记录单个文件的首次事件，用于去重。 */
 struct file_first_seen_entry {
-  file_event_type_t event;
+  file_event_type_msg_t event;
   dev_t dev;
   unsigned long ino;
   struct hlist_node node;
 };
 
+/* 记录单个进程下的文件事件去重状态。 */
 struct file_first_seen_pid_entry {
   pid_t tgid;
   spinlock_t lock;
@@ -39,6 +49,7 @@ struct file_first_seen_pid_entry {
   u32 file_count;
 };
 
+/* 主监听器对象，串联内核探针、工作队列与回调。 */
 struct file_listener {
   struct tcm_kretprobe_handle *open_handle;
   struct tcm_kprobe_handle *write_handle;
@@ -52,23 +63,26 @@ struct file_listener {
   atomic_t pending_work;
 };
 
+/* 延迟执行的工作项，保证在原始上下文外进行路径解析与回调。 */
 typedef struct {
   struct work_struct work;
   file_listener_t *listener;
   struct file *file;
-  file_event_t event;
+  file_event_msg_t event;
 } file_event_work_t;
 
+/* 根据 PID 选择哈希桶，降低并发冲突。 */
 static inline struct hlist_head *
 file_listener_pid_bucket(file_listener_t *listener, pid_t pid) {
   return &listener->first_seen_by_pid[hash_min((u32)pid,
                                                FILE_FIRST_SEEN_PID_HASH_BITS)];
 }
 
+/* 针对单个 PID 内再次哈希，区分不同设备与 inode。 */
 static inline struct hlist_head *
 file_listener_file_bucket(struct file_first_seen_pid_entry *pid_entry,
                           dev_t dev, unsigned long ino,
-                          file_event_type_t event) {
+                          file_event_type_msg_t event) {
   u64 dev64 = (u64)dev;
   u64 ino64 = (u64)ino;
   u32 hash = (u32)dev64;
@@ -81,6 +95,7 @@ file_listener_file_bucket(struct file_first_seen_pid_entry *pid_entry,
   return &pid_entry->files[hash_min(hash, FILE_FIRST_SEEN_FILE_HASH_BITS)];
 }
 
+/* 在持有 first_seen_lock 的情况下按 PID 查找缓存条目。 */
 static inline struct file_first_seen_pid_entry *
 file_listener_find_pid_entry_locked(file_listener_t *listener, pid_t pid) {
   struct file_first_seen_pid_entry *entry;
@@ -95,6 +110,7 @@ file_listener_find_pid_entry_locked(file_listener_t *listener, pid_t pid) {
   return NULL;
 }
 
+/* 分配 PID 级别的去重结构，初始化内部哈希表。 */
 static struct file_first_seen_pid_entry *
 file_listener_alloc_pid_entry(pid_t pid) {
   struct file_first_seen_pid_entry *pid_entry;
@@ -112,6 +128,7 @@ file_listener_alloc_pid_entry(pid_t pid) {
   return pid_entry;
 }
 
+/* 与 file_listener_get_* 配套，统一释放自旋锁。 */
 static inline void
 file_listener_put_pid_entry(struct file_first_seen_pid_entry *pid_entry) {
   if (pid_entry) {
@@ -128,22 +145,26 @@ file_listener_free_pid_entry(struct file_first_seen_pid_entry *pid_entry) {
   kfree(pid_entry);
 }
 
+/* 如果不存在则创建 PID 条目，避免在中断上下文重复分配。 */
 static struct file_first_seen_pid_entry *
 file_listener_get_or_create_pid_entry(file_listener_t *listener, pid_t pid) {
   struct file_first_seen_pid_entry *pid_entry;
   struct file_first_seen_pid_entry *new_entry = NULL;
   struct hlist_head *bucket;
 
+  /* 先尝试在全局哈希表中命中已有的 PID 条目。 */
   spin_lock(&listener->first_seen_lock);
   pid_entry = file_listener_find_pid_entry_locked(listener, pid);
   if (!pid_entry) {
     spin_unlock(&listener->first_seen_lock);
 
+    /* 若未命中，则在全局锁外分配候选条目，避免长时间持锁。 */
     new_entry = file_listener_alloc_pid_entry(pid);
     if (!new_entry) {
       return NULL;
     }
 
+    /* 双检：重新获取全局锁并确认是否有其它 CPU 新增了条目。 */
     spin_lock(&listener->first_seen_lock);
     pid_entry = file_listener_find_pid_entry_locked(listener, pid);
     if (!pid_entry) {
@@ -154,9 +175,11 @@ file_listener_get_or_create_pid_entry(file_listener_t *listener, pid_t pid) {
     }
   }
 
+  /* 返回前加锁 PID 条目，调用方可直接访问内部文件哈希。 */
   spin_lock(&pid_entry->lock);
   spin_unlock(&listener->first_seen_lock);
 
+  /* 若最终未使用临时分配的条目，立即释放避免泄漏。 */
   if (new_entry) {
     file_listener_free_pid_entry(new_entry);
   }
@@ -164,6 +187,7 @@ file_listener_get_or_create_pid_entry(file_listener_t *listener, pid_t pid) {
   return pid_entry;
 }
 
+/* 仅获取已存在的 PID 条目，用于 remove/unmark 等路径。 */
 static struct file_first_seen_pid_entry *
 file_listener_get_pid_entry(file_listener_t *listener, pid_t pid) {
   struct file_first_seen_pid_entry *pid_entry;
@@ -181,8 +205,9 @@ file_listener_get_pid_entry(file_listener_t *listener, pid_t pid) {
   return pid_entry;
 }
 
+/* 去重逻辑：首次看到时返回 true，后续重复事件返回 false。 */
 static bool file_listener_mark_first_seen(file_listener_t *listener, pid_t pid,
-                                          file_event_type_t event,
+                                          file_event_type_msg_t event,
                                           struct file *file) {
   struct file_first_seen_entry *entry;
   struct file_first_seen_entry *new_entry;
@@ -208,12 +233,14 @@ static bool file_listener_mark_first_seen(file_listener_t *listener, pid_t pid,
   dev = inode->i_sb ? inode->i_sb->s_dev : 0;
   ino = inode->i_ino;
 
+  /* 使用 inode 的设备号与编号作为事件去重键。 */
   pid_entry = file_listener_get_or_create_pid_entry(listener, pid);
   if (!pid_entry) {
     pr_warn("%s: failed to allocate pid entry for pid %d\n", __func__, pid);
     return true;
   }
 
+  /* 在 PID 私有哈希桶中查找是否已存在同类型事件。 */
   bucket = file_listener_file_bucket(pid_entry, dev, ino, event);
   hlist_for_each_entry(entry, bucket, node) {
     if (entry->event == event && entry->dev == dev && entry->ino == ino) {
@@ -235,6 +262,7 @@ static bool file_listener_mark_first_seen(file_listener_t *listener, pid_t pid,
   new_entry->ino = ino;
   INIT_HLIST_NODE(&new_entry->node);
 
+  /* 未重复时将新记录插入哈希桶，并更新计数。 */
   hlist_add_head(&new_entry->node, bucket);
   pid_entry->file_count++;
 
@@ -243,8 +271,10 @@ static bool file_listener_mark_first_seen(file_listener_t *listener, pid_t pid,
   return true;
 }
 
+/* 去重回滚：在白名单过滤或任务结束时清除对应记录。 */
 static void file_listener_unmark_first_seen(file_listener_t *listener,
-                                            pid_t pid, file_event_type_t event,
+                                            pid_t pid,
+                                            file_event_type_msg_t event,
                                             struct file *file) {
   struct file_first_seen_entry *entry;
   struct hlist_node *tmp;
@@ -267,12 +297,14 @@ static void file_listener_unmark_first_seen(file_listener_t *listener,
   dev = inode->i_sb ? inode->i_sb->s_dev : 0;
   ino = inode->i_ino;
 
+  /* 通过 inode 唯一标识定位到对应的去重记录。 */
   pid_entry = file_listener_get_pid_entry(listener, pid);
   if (!pid_entry) {
     return;
   }
 
   bucket = file_listener_file_bucket(pid_entry, dev, ino, event);
+  /* 遍历目标桶，移除匹配的事件条目，并维护计数。 */
   hlist_for_each_entry_safe(entry, tmp, bucket, node) {
     if (entry->event != event || entry->dev != dev || entry->ino != ino) {
       continue;
@@ -296,6 +328,7 @@ static void file_listener_unmark_first_seen(file_listener_t *listener,
   file_listener_put_pid_entry(pid_entry);
 
   spin_lock(&listener->first_seen_lock);
+  /* 如果当前 PID 已无事件记录，则从全局哈希表摘除并释放。 */
   pid_entry = file_listener_find_pid_entry_locked(listener, pid);
   if (pid_entry) {
     spin_lock(&pid_entry->lock);
@@ -311,6 +344,7 @@ static void file_listener_unmark_first_seen(file_listener_t *listener,
   spin_unlock(&listener->first_seen_lock);
 }
 
+/* 模块退出前清空所有 first_seen 状态，防止内存泄漏。 */
 static void file_listener_reset_first_seen(file_listener_t *listener) {
   struct file_first_seen_pid_entry *pid_entry;
   struct hlist_node *tmp_pid;
@@ -323,6 +357,7 @@ static void file_listener_reset_first_seen(file_listener_t *listener) {
     return;
   }
 
+  /* 遍历所有 PID 桶并逐一清空内部文件去重状态。 */
   spin_lock(&listener->first_seen_lock);
   hash_for_each_safe(listener->first_seen_by_pid, bkt_pid, tmp_pid, pid_entry,
                      node) {
@@ -348,6 +383,7 @@ static void file_listener_reset_first_seen(file_listener_t *listener) {
   spin_unlock(&listener->first_seen_lock);
 }
 
+/* 在进程退出时移除对应 PID 的所有缓存信息。 */
 static void file_listener_remove_first_seen_pid(file_listener_t *listener,
                                                 pid_t pid) {
   struct file_first_seen_pid_entry *pid_entry;
@@ -383,6 +419,7 @@ static void file_listener_remove_first_seen_pid(file_listener_t *listener,
   file_listener_free_pid_entry(pid_entry);
 }
 
+/* 从 file 结构解析出绝对路径，供用户态消费。 */
 static void file_event_resolve_path(struct file *file, char *buf,
                                     size_t buflen) {
   char *path;
@@ -409,9 +446,11 @@ static void file_event_resolve_path(struct file *file, char *buf,
   }
 }
 
+/* 工作队列回调：二次校验白名单并投递最终事件。 */
 static void file_event_workfn(struct work_struct *work) {
   file_event_work_t *event_work = container_of(work, file_event_work_t, work);
   file_listener_t *listener = event_work->listener;
+  bool should_emit = true;
 
   if (!event_work) {
     pr_warn("%s: event_work is NULL\n", __func__);
@@ -428,20 +467,38 @@ static void file_event_workfn(struct work_struct *work) {
     return;
   }
 
+  /* 在工作队列上下文中解析文件路径，避免阻塞探针热路径。 */
   file_event_resolve_path(event_work->file, event_work->event.path,
                           sizeof(event_work->event.path));
+
+  if (!event_work->event.path[0]) {
+    should_emit = false;
+  } else if (file_whitelist_contains(event_work->event.path)) {
+    should_emit = false;
+  }
+
+  if (!should_emit) {
+    file_listener_unmark_first_seen(listener, event_work->event.pid,
+                                    event_work->event.operation,
+                                    event_work->file);
+  }
+
   fput(event_work->file);
   event_work->file = NULL;
 
-  listener->callback(&event_work->event, listener->callback_user_data);
+  if (should_emit) {
+    listener->callback(&event_work->event, listener->callback_user_data);
+  }
+
   atomic_dec(&listener->pending_work);
 
   kfree(event_work);
 }
 
 // listener && listener->callback && listener->wq must be non-NULL
+/* 将文件事件封装到工作队列，避免在 kprobe 上下文中做重操作。 */
 static int queue_file_event(file_listener_t *listener,
-                            file_event_type_t operation, int fd,
+                            file_event_type_msg_t operation, int fd,
                             struct file *file) {
   file_event_work_t *work;
   pid_t pid;
@@ -469,6 +526,7 @@ static int queue_file_event(file_listener_t *listener,
   // the tgid is the real pid of the process
   pid = task_tgid_nr(current);
 
+  /* PID 在白名单中时直接忽略并归还引用。 */
   if (pid_whitelist_contains(pid)) {
     if (file) {
       fput(file);
@@ -476,6 +534,7 @@ static int queue_file_event(file_listener_t *listener,
     return 0;
   }
 
+  /* 对相同 PID + 文件 + 操作的重复事件做去重，避免多次排队。 */
   if (!file_listener_mark_first_seen(listener, pid, operation, file)) {
     if (file) {
       fput(file);
@@ -496,11 +555,12 @@ static int queue_file_event(file_listener_t *listener,
   INIT_WORK(&work->work, file_event_workfn);
   work->listener = listener;
   work->file = file;
-  work->event.pid = pid;
-  work->event.fd = fd;
+  work->event.pid = (s32)pid;
+  work->event.fd = (s32)fd;
   work->event.operation = operation;
   work->event.path[0] = '\0';
 
+  /* 将事件转换为异步工作，保证耗时操作在工作队列中完成。 */
   if (!queue_work(listener->wq, &work->work)) {
     file_listener_unmark_first_seen(listener, pid, operation, file);
     if (file) {
@@ -655,6 +715,7 @@ static int register_open_probe(file_listener_t *listener) {
                                 &listener->open_handle);
 }
 
+/* 注册 write kprobe，捕获同步写操作。 */
 static int register_write_probe(file_listener_t *listener) {
   const struct tcm_kprobe_config config = {
       .pre_handler = file_write_pre_handler,
@@ -665,6 +726,7 @@ static int register_write_probe(file_listener_t *listener) {
                              &listener->write_handle);
 }
 
+/* 注册 close kprobe，追踪文件描述符关闭事件。 */
 static int register_close_probe(file_listener_t *listener) {
   const struct tcm_kprobe_config config = {
       .pre_handler = file_close_pre_handler,
@@ -675,6 +737,7 @@ static int register_close_probe(file_listener_t *listener) {
                              &listener->close_handle);
 }
 
+/* 注册 exit kprobe，监听进程退出以清理缓存。 */
 static int register_exit_probe(file_listener_t *listener) {
   const struct tcm_kprobe_config config = {
       .pre_handler = exit_kprobe_pre_handler,
@@ -684,6 +747,7 @@ static int register_exit_probe(file_listener_t *listener) {
                              &listener->exit_handle);
 }
 
+/* 初始化文件监听器，注册所有内核探针并创建工作队列。 */
 int file_listener_init(file_listener_t **listener,
                        file_event_callback_t callback,
                        void *callback_user_data) {
@@ -699,6 +763,7 @@ int file_listener_init(file_listener_t **listener,
     return 0;
   }
 
+  /* 分配监听器主体并初始化去重相关的基础结构。 */
   *listener = kzalloc(sizeof(file_listener_t), GFP_KERNEL);
   if (!*listener) {
     pr_warn("  %s: failed to kmalloc file listener\n", __func__);
@@ -710,6 +775,7 @@ int file_listener_init(file_listener_t **listener,
 
   struct workqueue_struct *wq;
 
+  /* 创建专用工作队列，确保事件处理不会阻塞原始上下文。 */
   wq = alloc_workqueue("tcm_file_events", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
   if (!wq) {
     pr_err("  %s: failed to create workqueue\n", __func__);
@@ -721,6 +787,7 @@ int file_listener_init(file_listener_t **listener,
   (*listener)->callback_user_data = callback_user_data;
   (*listener)->callback = callback;
 
+  /* 依次注册所有所需的内核探针，任一失败都会回滚初始化。 */
   int ret = register_exit_probe(*listener);
   if (ret) {
     pr_err("%s: failed to register exit kprobe: %d\n", __func__, ret);
@@ -754,6 +821,7 @@ int file_listener_init(file_listener_t **listener,
   return 0;
 }
 
+/* 统计当前监听器正在跟踪的进程与文件数量，供用户态查询。 */
 int file_listener_get_stats(file_listener_t *listener,
                             file_listener_stats_t *stats) {
   struct file_first_seen_pid_entry *pid_entry;
@@ -768,6 +836,7 @@ int file_listener_get_stats(file_listener_t *listener,
   stats->top_pid_count = 0;
   memset(stats->top_pids, 0, sizeof(stats->top_pids));
 
+  /* 遍历 PID 桶，统计总量的同时维护 top N 活跃进程列表。 */
   spin_lock(&listener->first_seen_lock);
   hash_for_each(listener->first_seen_by_pid, bkt, pid_entry, node) {
     pid_entry_count++;
@@ -776,7 +845,7 @@ int file_listener_get_stats(file_listener_t *listener,
 
     if (pid_entry->file_count) {
       file_listener_pid_stat_t stat = {
-          .pid = pid_entry->tgid,
+          .pid = (s32)pid_entry->tgid,
           .file_count = pid_entry->file_count,
       };
       int insert_idx = -1;
@@ -825,6 +894,7 @@ int file_listener_get_stats(file_listener_t *listener,
   return 0;
 }
 
+/* 将统计信息打印到内核日志，方便排查。 */
 void file_listener_dump_stats(file_listener_t *listener) {
   file_listener_stats_t stats;
 
@@ -855,6 +925,7 @@ void file_listener_dump_stats(file_listener_t *listener) {
   }
 }
 
+/* 注销所有探针与工作队列，释放监听器资源。 */
 void file_listener_exit(file_listener_t **listener) {
   if (!listener) {
     pr_warn("%s: invalid file listener\n", __func__);
@@ -868,6 +939,7 @@ void file_listener_exit(file_listener_t **listener) {
 
   pr_info("%s\n", __func__);
 
+  /* 注销所有注册的 kprobe/kretprobe，防止后续再触发回调。 */
   tcm_kretprobe_unregister(&(*listener)->open_handle);
   tcm_kprobe_unregister(&(*listener)->write_handle);
   tcm_kprobe_unregister(&(*listener)->close_handle);
@@ -876,6 +948,7 @@ void file_listener_exit(file_listener_t **listener) {
   if ((*listener)->wq) {
     pr_info("  %s: flushing workqueue, pending_work=%u\n", __func__,
             atomic_read(&(*listener)->pending_work));
+    /* 等待在途工作完成后再销毁队列，避免悬空指针。 */
     flush_workqueue((*listener)->wq);
     pr_info("  %s: flushed\n", __func__);
 
@@ -886,6 +959,7 @@ void file_listener_exit(file_listener_t **listener) {
   (*listener)->callback = NULL;
   (*listener)->callback_user_data = NULL;
 
+  /* 清理 first_seen 状态，释放所有缓存的 PID/文件条目。 */
   file_listener_reset_first_seen(*listener);
 
   kfree(*listener);
