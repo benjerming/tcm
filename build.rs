@@ -125,7 +125,9 @@ fn lauch_k() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    println!("cargo:rerun-if-changed=.env");
     dotenvy::dotenv().ok();
+    println!("cargo:rerun-if-changed=k/api/include/tcm/api.h");
     generate_bindings()?;
     lauch_k()?;
     Ok(())
