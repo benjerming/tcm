@@ -9,8 +9,8 @@
 #include <net/netlink.h>
 
 #include "tcm/api.h"
-#include "tcm/listeners/file.h"
-#include "tcm/netlink/genl.h"
+#include "tcm/genl.h"
+#include "tcm/kprobes/file.h"
 #include "tcm/whitelist/file.h"
 #include "tcm/whitelist/pid.h"
 
@@ -31,11 +31,10 @@ struct genl_core {
 };
 
 /* 处理客户端注册请求，将调用方 PID 加入白名单。 */
-static int genl_core_handle_register(struct sk_buff *skb,
-                                     struct genl_info *info) {
+static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
   genl_core_t *core;
-  pid_t pid;
   int ret;
+  const char *key = NULL;
 
   if (!info) {
     pr_warn("%s: invalid genl_info\n", __func__);
@@ -48,28 +47,27 @@ static int genl_core_handle_register(struct sk_buff *skb,
     return -EINVAL;
   }
 
-  if (info->attrs[TCM_GENL_ATTR_CLIENT_PID]) {
-    pid = (pid_t)nla_get_s32(info->attrs[TCM_GENL_ATTR_CLIENT_PID]);
-  } else {
-    pid = (pid_t)info->snd_portid;
+  if (info->attrs[TCM_GENL_ATTR_KEY]) {
+    key = (const char *)nla_data(info->attrs[TCM_GENL_ATTR_KEY]);
   }
-
-  if (pid <= 0) {
-    pr_warn("%s: invalid pid (%d)\n", __func__, pid);
+  if (!key) {
+    pr_warn("%s: invalid key\n", __func__);
     return -EINVAL;
   }
 
-  ret = pid_whitelist_add(pid);
-  if (ret == -EEXIST) {
-    ret = 0;
+  if (strcmp(key, "1234567890") != 0) {
+    pr_warn("%s: invalid key\n", __func__);
+    return -EINVAL;
   }
-  if (ret) {
-    pr_warn("%s: pid_whitelist_add failed for pid=%d: %d\n", __func__, pid,
-            ret);
+
+  ret = pid_whitelist_add(info->snd_portid);
+  if (ret != 0 && ret != -EEXIST) {
+    pr_warn("%s: pid_whitelist_add failed for pid=%d: %d\n", __func__,
+            info->snd_portid, ret);
     return ret;
   }
 
-  pr_info("%s: registered client pid=%d\n", __func__, pid);
+  pr_info("%s: registered client pid=%d\n", __func__, info->snd_portid);
   return 0;
 }
 
@@ -180,12 +178,12 @@ static int genl_core_parse_file_whitelist(struct genl_info *info,
     return -EINVAL;
   }
 
-  if (!info->attrs[TCM_GENL_ATTR_FILE_WHITELIST_PATH]) {
-    pr_warn("%s: missing FILE_WHITELIST_PATH attribute\n", __func__);
+  if (!info->attrs[TCM_GENL_ATTR_PATH1]) {
+    pr_warn("%s: missing TCM_GENL_ATTR_PATH1 attribute\n", __func__);
     return -EINVAL;
   }
 
-  *path = nla_data(info->attrs[TCM_GENL_ATTR_FILE_WHITELIST_PATH]);
+  *path = nla_data(info->attrs[TCM_GENL_ATTR_PATH1]);
   if (!*path) {
     pr_warn("%s: invalid whitelist path attribute\n", __func__);
     return -EINVAL;
@@ -237,6 +235,35 @@ static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
   return ret;
 }
 
+static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
+                                               struct genl_info *info) {
+  // TODO
+  // const char *path;
+  // int ret;
+  // ret = proc_whitelist_add(path);
+  // if (ret) {
+  //   pr_warn("%s: proc_whitelist_add failed for \"%s\": %d\n", __func__, path,
+  //           ret);
+  // }
+  // return ret;
+  return 0;
+}
+
+static int genl_core_handle_proc_whitelist_remove(struct sk_buff *skb,
+                                                  struct genl_info *info) {
+  // TODO
+  // const char *path;
+  // int ret;
+  // ret = proc_whitelist_remove(path);
+  // if (ret) {
+  //   pr_warn("%s: proc_whitelist_remove failed for \"%s\": %d\n", __func__,
+  //   path,
+  //           ret);
+  // }
+  // return ret;
+  return 0;
+}
+
 /* 注册 genetlink family，并初始化命令/多播配置。 */
 int genl_core_init(genl_core_t **core) {
   pr_info("%s\n", __func__);
@@ -259,16 +286,18 @@ int genl_core_init(genl_core_t **core) {
 
   /* 在栈上准备策略、组和命令的模板配置。 */
   struct nla_policy policy[TCM_GENL_ATTR_MAX] = {
-      [TCM_GENL_ATTR_PARENT_PID] = {.type = NLA_S32},
-      [TCM_GENL_ATTR_CHILD_PID] = {.type = NLA_S32},
-      [TCM_GENL_ATTR_PARENT_PATH] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
-      [TCM_GENL_ATTR_CHILD_PATH] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
-      [TCM_GENL_ATTR_FILE_PID] = {.type = NLA_S32},
-      [TCM_GENL_ATTR_FILE_FD] = {.type = NLA_S32},
-      [TCM_GENL_ATTR_FILE_PATH] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
-      [TCM_GENL_ATTR_FILE_OPERATION] = {.type = NLA_U8},
-      [TCM_GENL_ATTR_EXIT_PID] = {.type = NLA_S32},
-      [TCM_GENL_ATTR_EXIT_CODE] = {.type = NLA_S32},
+      [TCM_GENL_ATTR_PPID] = {.type = NLA_S32},
+      [TCM_GENL_ATTR_PID] = {.type = NLA_S32},
+      [TCM_GENL_ATTR_KEY] =
+          {
+              .type = NLA_NUL_STRING,
+              .len = TCM_GENL_ATTR_KEY_MAX_LEN,
+          },
+      [TCM_GENL_ATTR_PROC_EVENT_TYPE] = {.type = NLA_U8},
+      [TCM_GENL_ATTR_FILE_EVENT_TYPE] = {.type = NLA_U8},
+      [TCM_GENL_ATTR_FD] = {.type = NLA_S32},
+      [TCM_GENL_ATTR_PATH1] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
+      [TCM_GENL_ATTR_PATH2] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
       [TCM_GENL_ATTR_FILE_STATS_PID_TABLE_SIZE] = {.type = NLA_U32},
       [TCM_GENL_ATTR_FILE_STATS_PID_ENTRY_COUNT] = {.type = NLA_U32},
       [TCM_GENL_ATTR_FILE_STATS_FILE_ENTRY_COUNT] = {.type = NLA_U32},
@@ -279,12 +308,6 @@ int genl_core_init(genl_core_t **core) {
               .len = FILE_LISTENER_TOP_PID_LIMIT *
                      sizeof(file_listener_pid_stat_t),
           },
-      [TCM_GENL_ATTR_CLIENT_PID] = {.type = NLA_S32},
-      [TCM_GENL_ATTR_FILE_WHITELIST_PATH] =
-          {
-              .type = NLA_NUL_STRING,
-              .len = PATH_MAX,
-          },
   };
   struct genl_multicast_group mcgrps[TCM_GENL_MCGRP_COUNT] = {
       [TCM_GENL_MCGRP_HOOK] =
@@ -294,10 +317,10 @@ int genl_core_init(genl_core_t **core) {
   };
   struct genl_ops ops[TCM_GENL_CMD_OPS_COUNT] = {
       {
-          .cmd = TCM_GENL_CMD_REGISTER,
+          .cmd = TCM_GENL_CMD_LOGIN,
           .policy = (*core)->policy,
           .maxattr = TCM_GENL_ATTR_MAX,
-          .doit = genl_core_handle_register,
+          .doit = genl_core_handle_login,
       },
       {
           .cmd = TCM_GENL_CMD_GET_FILE_STATS,
@@ -316,6 +339,18 @@ int genl_core_init(genl_core_t **core) {
           .policy = (*core)->policy,
           .maxattr = TCM_GENL_ATTR_MAX,
           .doit = genl_core_handle_file_whitelist_remove,
+      },
+      {
+          .cmd = TCM_GENL_CMD_PROC_WHITELIST_ADD,
+          .policy = (*core)->policy,
+          .maxattr = TCM_GENL_ATTR_MAX,
+          .doit = genl_core_handle_proc_whitelist_add,
+      },
+      {
+          .cmd = TCM_GENL_CMD_PROC_WHITELIST_REMOVE,
+          .policy = (*core)->policy,
+          .maxattr = TCM_GENL_ATTR_MAX,
+          .doit = genl_core_handle_proc_whitelist_remove,
       },
   };
 
@@ -383,9 +418,9 @@ int genl_core_set_file_listener(genl_core_t *core, file_listener_t *listener) {
   return 0;
 }
 
-/* 将 fork 返回事件封装为 Netlink 多播消息。 */
-static int genl_core_send_fork_ret_event(genl_core_t *core,
-                                         const fork_ret_event_msg_t *event) {
+/* 将进程事件封装为 Netlink 多播消息。 */
+static int genl_core_send_proc_event(genl_core_t *core,
+                                     const proc_event_t *event) {
   if (!core) {
     pr_warn("%s: genl_core not initialized\n", __func__);
     return -EINVAL;
@@ -394,25 +429,25 @@ static int genl_core_send_fork_ret_event(genl_core_t *core,
   struct sk_buff *skb;
   void *msg_head;
 
-  /* 为 fork 返回事件准备 Netlink skb。 */
+  /* 为进程事件准备 Netlink skb。 */
   skb = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_ATOMIC);
   if (!skb) {
     pr_warn("%s: failed to allocate netlink skb\n", __func__);
     return -ENOMEM;
   }
 
-  msg_head =
-      genlmsg_put(skb, 0, 0, &core->family, 0, TCM_GENL_CMD_FORK_RET_EVENT);
+  msg_head = genlmsg_put(skb, 0, 0, &core->family, 0, TCM_GENL_CMD_PROC_EVENT);
   if (!msg_head) {
     pr_warn("%s: genlmsg_put failed\n", __func__);
     nlmsg_free(skb);
     return -EMSGSIZE;
   }
 
-  /* 按属性编码父/子进程 PID，供用户态解码。 */
-  if (nla_put_s32(skb, TCM_GENL_ATTR_PARENT_PID, event->parent_pid) ||
-      nla_put_s32(skb, TCM_GENL_ATTR_CHILD_PID, event->child_pid)) {
-    pr_warn("%s: nla_put failed for fork_ret_event\n", __func__);
+  /* 按属性编码进程事件类型、PID、PPID，供用户态解码。 */
+  if (nla_put_u8(skb, TCM_GENL_ATTR_PROC_EVENT_TYPE, event->type) ||
+      nla_put_s32(skb, TCM_GENL_ATTR_PID, event->pid) ||
+      nla_put_s32(skb, TCM_GENL_ATTR_PPID, event->ppid)) {
+    pr_warn("%s: nla_put failed for proc_event\n", __func__);
     genlmsg_cancel(skb, msg_head);
     nlmsg_free(skb);
     return -EMSGSIZE;
@@ -424,8 +459,7 @@ static int genl_core_send_fork_ret_event(genl_core_t *core,
   int ret =
       genlmsg_multicast(&core->family, skb, 0, TCM_GENL_MCGRP_HOOK, GFP_ATOMIC);
   if (ret < 0 && ret != -ESRCH) {
-    pr_warn("%s: genlmsg_multicast failed for fork_ret_event: %d\n", __func__,
-            ret);
+    pr_warn("%s: genlmsg_multicast failed for proc_event: %d\n", __func__, ret);
     return ret;
   }
 
@@ -434,7 +468,7 @@ static int genl_core_send_fork_ret_event(genl_core_t *core,
 
 /* 将文件操作事件推送到用户态。 */
 static int genl_core_send_file_event(genl_core_t *core,
-                                     const file_event_msg_t *event) {
+                                     const file_event_t *event) {
   struct sk_buff *skb;
   void *msg_head;
   int ret;
@@ -471,10 +505,10 @@ static int genl_core_send_file_event(genl_core_t *core,
   }
 
   /* 将 PID、FD、操作类型与路径依次写入属性。 */
-  if (nla_put_s32(skb, TCM_GENL_ATTR_FILE_PID, event->pid) ||
-      nla_put_s32(skb, TCM_GENL_ATTR_FILE_FD, event->fd) ||
-      nla_put_u8(skb, TCM_GENL_ATTR_FILE_OPERATION, (u8)event->operation) ||
-      nla_put_string(skb, TCM_GENL_ATTR_FILE_PATH, event->path)) {
+  if (nla_put_u8(skb, TCM_GENL_ATTR_FILE_EVENT_TYPE, event->type) ||
+      nla_put_s32(skb, TCM_GENL_ATTR_FD, event->fd) ||
+      nla_put_s32(skb, TCM_GENL_ATTR_PID, event->pid) ||
+      nla_put_string(skb, TCM_GENL_ATTR_PATH1, event->path)) {
     pr_warn("%s: nla_put failed for file_event\n", __func__);
     genlmsg_cancel(skb, msg_head);
     nlmsg_free(skb);
@@ -494,72 +528,8 @@ static int genl_core_send_file_event(genl_core_t *core,
   return 0;
 }
 
-/* 将进程退出事件推送到用户态。 */
-static int genl_core_send_exit_event(genl_core_t *core,
-                                     const exit_event_t *event) {
-  struct sk_buff *skb;
-  void *msg_head;
-  int ret;
-
-  if (!core) {
-    pr_warn("%s: genl_core is NULL\n", __func__);
-    return -EINVAL;
-  }
-
-  if (!event) {
-    pr_warn("%s: event is NULL\n", __func__);
-    return -EINVAL;
-  }
-
-  /* 为进程退出事件创建 skb，并填充相应属性。 */
-  skb = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_ATOMIC);
-  if (!skb) {
-    pr_warn("%s: failed to allocate netlink skb\n", __func__);
-    return -ENOMEM;
-  }
-
-  msg_head = genlmsg_put(skb, 0, 0, &core->family, 0, TCM_GENL_CMD_EXIT_EVENT);
-  if (!msg_head) {
-    pr_warn("%s: genlmsg_put failed\n", __func__);
-    nlmsg_free(skb);
-    return -EMSGSIZE;
-  }
-
-  /* 写入退出 PID 与退出码，便于用户态做清理。 */
-  if (nla_put_s32(skb, TCM_GENL_ATTR_EXIT_PID, event->pid) ||
-      nla_put_s32(skb, TCM_GENL_ATTR_EXIT_CODE, event->code)) {
-    pr_warn("%s: nla_put failed for exit_event\n", __func__);
-    genlmsg_cancel(skb, msg_head);
-    nlmsg_free(skb);
-    return -EMSGSIZE;
-  }
-
-  genlmsg_end(skb, msg_head);
-
-  /* 投递到多播组；没有订阅者时同样忽略 ESRCH。 */
-  ret =
-      genlmsg_multicast(&core->family, skb, 0, TCM_GENL_MCGRP_HOOK, GFP_ATOMIC);
-  if (ret < 0 && ret != -ESRCH) {
-    pr_warn("%s: genlmsg_multicast failed for exit_event: %d\n", __func__, ret);
-    return ret;
-  }
-
-  return 0;
-}
-
-/* exit 监听器回调，通过 Netlink 转发事件。 */
-void genl_core_on_exit_event(const exit_event_t *event, void *user_data) {
-  genl_core_t *core = (genl_core_t *)user_data;
-  if (!core) {
-    pr_warn("%s: genl_core not initialized\n", __func__);
-    return;
-  }
-
-  genl_core_send_exit_event(core, event);
-}
-
 /* file 监听器回调，通过 Netlink 转发事件。 */
-void genl_core_on_file_event(const file_event_msg_t *event, void *user_data) {
+void genl_core_on_file_event(const file_event_t *event, void *user_data) {
   genl_core_t *core = (genl_core_t *)user_data;
   if (!core) {
     pr_warn("%s: genl_core not initialized\n", __func__);
@@ -568,14 +538,13 @@ void genl_core_on_file_event(const file_event_msg_t *event, void *user_data) {
   genl_core_send_file_event(core, event);
 }
 
-/* fork 返回监听器回调，通过 Netlink 转发事件。 */
-void genl_core_on_fork_ret_event(const fork_ret_event_msg_t *event,
-                                 void *user_data) {
+/* 进程事件监听器回调，通过 Netlink 转发事件。 */
+void genl_core_on_proc_event(const proc_event_t *event, void *user_data) {
   genl_core_t *core = (genl_core_t *)user_data;
   if (!core) {
     pr_warn("%s: genl_core not initialized\n", __func__);
     return;
   }
 
-  genl_core_send_fork_ret_event(core, event);
+  genl_core_send_proc_event(core, event);
 }

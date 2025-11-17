@@ -9,7 +9,7 @@ const KO_NAME: &str = "tcm.ko";
 
 fn generate_bindings() -> Result<()> {
     let header = PathBuf::from("k/api/include/tcm/api.h");
-    println!("cargo:rerun-if-changed={}", header.display());
+    println!("cargo:rerun-if-changed={header:?}");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let bindings = bindgen::Builder::default()
@@ -18,7 +18,7 @@ fn generate_bindings() -> Result<()> {
         .allowlist_var("TCM_GENL_.*")
         .default_enum_style(bindgen::EnumVariation::ModuleConsts)
         .generate()
-        .map_err(|_| anyhow!("failed to generate bindings from {}", header.display()))?;
+        .map_err(|_| anyhow!("failed to generate bindings from {header:?}"))?;
 
     bindings
         .write_to_file(out_dir.join("tcm_api.rs"))
@@ -126,8 +126,10 @@ fn lauch_k() -> Result<()> {
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=.env");
+    println!("cargo:rerun-if-changed=k/api");
+    println!("cargo:rerun-if-changed=k/include");
+    println!("cargo:rerun-if-changed=k/src");
     dotenvy::dotenv().ok();
-    println!("cargo:rerun-if-changed=k/api/include/tcm/api.h");
     generate_bindings()?;
     lauch_k()?;
     Ok(())

@@ -12,8 +12,8 @@ use tokio::signal;
 
 use crate::netlink::{TcmGenlBroadcastListener, TcmGenlClient, resolve_family_info};
 use crate::tcm::{
-    TcmEventHandler, TcmExitEvent, TcmFileEvent, TcmFileStats, TcmForkRetEvent, TcmPayload,
-    genl_family_name, genl_family_version, genl_mcgrp_name, handle_raw_message,
+    TcmEventHandler, TcmFileEvent, TcmFileStats, TcmPayload, TcmProcEvent, genl_family_name,
+    genl_family_version, genl_mcgrp_name, handle_raw_message,
 };
 
 #[tokio::main]
@@ -74,6 +74,10 @@ async fn main() -> Result<()> {
     let mut stdin = BufReader::new(stdin());
     let mut stdout = stdout();
     let mut input = String::new();
+
+    info!("logging in to TCM");
+    client.login().await.context("failed to login")?;
+    info!("  success");
 
     loop {
         stdout.write_all("\n".as_bytes()).await?;
@@ -237,15 +241,11 @@ async fn main() -> Result<()> {
 struct LoggingEventHandler;
 
 impl TcmEventHandler for LoggingEventHandler {
-    fn on_fork_ret(&self, event: TcmForkRetEvent) {
+    fn on_proc(&self, event: TcmProcEvent) {
         info!("{event:?}");
     }
 
     fn on_file(&self, event: TcmFileEvent) {
-        info!("{event:?}");
-    }
-
-    fn on_exit(&self, event: TcmExitEvent) {
         info!("{event:?}");
     }
 

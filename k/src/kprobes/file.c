@@ -17,8 +17,8 @@
 #include <linux/workqueue.h>
 
 #include "tcm/common.h"
-#include "tcm/kprobe.h"
-#include "tcm/listeners/file.h"
+#include "tcm/kprobes/core.h"
+#include "tcm/kprobes/file.h"
 #include "tcm/whitelist/file.h"
 #include "tcm/whitelist/pid.h"
 
@@ -34,7 +34,7 @@
 
 /* 记录单个文件的首次事件，用于去重。 */
 struct file_first_seen_entry {
-  file_event_type_msg_t event;
+  file_event_type_t event;
   dev_t dev;
   unsigned long ino;
   struct hlist_node node;
@@ -68,7 +68,7 @@ typedef struct {
   struct work_struct work;
   file_listener_t *listener;
   struct file *file;
-  file_event_msg_t event;
+  file_event_t event;
 } file_event_work_t;
 
 /* 根据 PID 选择哈希桶，降低并发冲突。 */
@@ -82,7 +82,7 @@ file_listener_pid_bucket(file_listener_t *listener, pid_t pid) {
 static inline struct hlist_head *
 file_listener_file_bucket(struct file_first_seen_pid_entry *pid_entry,
                           dev_t dev, unsigned long ino,
-                          file_event_type_msg_t event) {
+                          file_event_type_t event) {
   u64 dev64 = (u64)dev;
   u64 ino64 = (u64)ino;
   u32 hash = (u32)dev64;
@@ -207,7 +207,7 @@ file_listener_get_pid_entry(file_listener_t *listener, pid_t pid) {
 
 /* 去重逻辑：首次看到时返回 true，后续重复事件返回 false。 */
 static bool file_listener_mark_first_seen(file_listener_t *listener, pid_t pid,
-                                          file_event_type_msg_t event,
+                                          file_event_type_t event,
                                           struct file *file) {
   struct file_first_seen_entry *entry;
   struct file_first_seen_entry *new_entry;
@@ -273,8 +273,7 @@ static bool file_listener_mark_first_seen(file_listener_t *listener, pid_t pid,
 
 /* 去重回滚：在白名单过滤或任务结束时清除对应记录。 */
 static void file_listener_unmark_first_seen(file_listener_t *listener,
-                                            pid_t pid,
-                                            file_event_type_msg_t event,
+                                            pid_t pid, file_event_type_t event,
                                             struct file *file) {
   struct file_first_seen_entry *entry;
   struct hlist_node *tmp;
@@ -479,8 +478,7 @@ static void file_event_workfn(struct work_struct *work) {
 
   if (!should_emit) {
     file_listener_unmark_first_seen(listener, event_work->event.pid,
-                                    event_work->event.operation,
-                                    event_work->file);
+                                    event_work->event.type, event_work->file);
   }
 
   fput(event_work->file);
@@ -498,7 +496,7 @@ static void file_event_workfn(struct work_struct *work) {
 // listener && listener->callback && listener->wq must be non-NULL
 /* 将文件事件封装到工作队列，避免在 kprobe 上下文中做重操作。 */
 static int queue_file_event(file_listener_t *listener,
-                            file_event_type_msg_t operation, int fd,
+                            file_event_type_t operation, int fd,
                             struct file *file) {
   file_event_work_t *work;
   pid_t pid;
@@ -557,7 +555,7 @@ static int queue_file_event(file_listener_t *listener,
   work->file = file;
   work->event.pid = (s32)pid;
   work->event.fd = (s32)fd;
-  work->event.operation = operation;
+  work->event.type = operation;
   work->event.path[0] = '\0';
 
   /* 将事件转换为异步工作，保证耗时操作在工作队列中完成。 */

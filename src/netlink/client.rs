@@ -6,7 +6,7 @@ use netlink_packet_core::{
 };
 use netlink_packet_generic::GenlMessage;
 
-use crate::tcm::{TcmAttr, TcmCommand, TcmFileStats, TcmPayload, TcmOperateCmd};
+use crate::tcm::{TcmAttr, TcmCommand, TcmFileStats, TcmOperateCmd, TcmPayload};
 
 pub struct TcmGenlClient {
     handle: GenetlinkHandle,
@@ -117,6 +117,15 @@ impl TcmGenlClient {
         self.request(TcmCommand::Operation(op), nlas).await
     }
 
+    pub async fn login(&mut self) -> Result<()> {
+        self.put(
+            TcmOperateCmd::Login,
+            vec![TcmAttr::Key("1234567890".to_owned())],
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn get_file_monitor_stats(&mut self) -> Result<TcmFileStats> {
         self.get(
             TcmCommand::Operation(TcmOperateCmd::GetFileStats),
@@ -129,12 +138,16 @@ impl TcmGenlClient {
     pub async fn put_file_whitelist(&mut self, path: &str) -> Result<()> {
         let mut nlas = Vec::with_capacity(2);
         nlas.push(TcmAttr::FileWhitelistPath(path.to_owned()));
-        self.put(TcmOperateCmd::FileWhitelistAdd, nlas).await.map(|_| ())
+        self.put(TcmOperateCmd::FileWhitelistAdd, nlas)
+            .await
+            .map(|_| ())
     }
 
     pub async fn delete_file_whitelist(&mut self, path: &str) -> Result<()> {
         let mut nlas = Vec::with_capacity(2);
         nlas.push(TcmAttr::FileWhitelistPath(path.to_owned()));
-        self.put(TcmOperateCmd::FileWhitelistRemove, nlas).await.map(|_| ())
+        self.put(TcmOperateCmd::FileWhitelistRemove, nlas)
+            .await
+            .map(|_| ())
     }
 }

@@ -1,5 +1,5 @@
-#ifndef TCM_KPROBE_H
-#define TCM_KPROBE_H
+#ifndef TCM_KPROBES_CORE_H
+#define TCM_KPROBES_CORE_H
 
 #include <linux/kprobes.h>
 #include <linux/types.h>
@@ -51,4 +51,4 @@ int tcm_kretprobe_register(enum tcm_kretprobe_target target,
 void tcm_kretprobe_unregister(struct tcm_kretprobe_handle **handle);
 void *tcm_kretprobe_get_user_data(const struct kretprobe *krp);
 
-#endif /* TCM_KPROBE_H */
+#endif /* TCM_KPROBES_CORE_H */

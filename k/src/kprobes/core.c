@@ -2,7 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 
-#include "tcm/kprobe.h"
+#include "tcm/kprobes/core.h"
 
 /* 内核态 kprobe/kretprobe 适配层，统一管理目标符号的注册与销毁。 */
 

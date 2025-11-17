@@ -1,12 +1,10 @@
 obj-m += tcm.o
 
 tcm-y := src/main.o \
-	src/kprobe.o \
-	src/netlink/genl.o \
-	src/listeners/fork.o \
-	src/listeners/forkret.o \
-	src/listeners/file.o \
-	src/listeners/exit.o \
+	src/genl.o \
+	src/kprobes/core.o \
+	src/kprobes/file.o \
+	src/kprobes/proc.o \
 	src/whitelist/pid.o \
 	src/whitelist/file.o
 

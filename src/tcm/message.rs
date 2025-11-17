@@ -13,8 +13,7 @@ use super::attr::TcmAttr;
 use super::command::{TcmCommand, TcmEventCmd};
 use super::constants::{genl_family_name, genl_family_version};
 
-pub(crate) const FILE_LISTENER_PID_STAT_SIZE: usize =
-    mem::size_of::<i32>() + mem::size_of::<u32>();
+pub(crate) const FILE_LISTENER_PID_STAT_SIZE: usize = mem::size_of::<i32>() + mem::size_of::<u32>();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileListenerPidStat {
@@ -58,86 +57,70 @@ impl TcmPayload {
         }
     }
 
-    pub fn parent_pid(&self) -> Result<i32, DecodeError> {
-        self.find_i32(|attr| match attr {
-            TcmAttr::ParentPid(pid) => Some(*pid),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PARENT_PID"))
-    }
-
-    pub fn child_pid(&self) -> Result<i32, DecodeError> {
-        self.find_i32(|attr| match attr {
-            TcmAttr::ChildPid(pid) => Some(*pid),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_CHILD_PID"))
-    }
-
-    #[allow(dead_code)]
-    pub fn parent_path(&self) -> Result<String, DecodeError> {
-        self.find_string(|attr| match attr {
-            TcmAttr::ParentPath(path) => Some(path.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PARENT_PATH"))
-    }
-
-    #[allow(dead_code)]
-    pub fn child_path(&self) -> Result<String, DecodeError> {
-        self.find_string(|attr| match attr {
-            TcmAttr::ChildPath(path) => Some(path.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_CHILD_PATH"))
-    }
-
-    pub fn file_pid(&self) -> Result<i32, DecodeError> {
-        self.find_i32(|attr| match attr {
-            TcmAttr::FilePid(pid) => Some(*pid),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_FILE_PID"))
-    }
-
-    pub fn file_fd(&self) -> Result<i32, DecodeError> {
-        self.find_i32(|attr| match attr {
-            TcmAttr::FileFd(fd) => Some(*fd),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_FILE_FD"))
-    }
-
-    pub fn file_path(&self) -> Result<String, DecodeError> {
-        self.find_string(|attr| match attr {
-            TcmAttr::FilePath(path) => Some(path.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_FILE_PATH"))
-    }
-
-    pub fn file_operation(&self) -> Result<u8, DecodeError> {
+    pub fn proc_event_type(&self) -> Result<u8, DecodeError> {
         self.find_u8(|attr| match attr {
-            TcmAttr::FileOperation(op) => Some(*op),
+            TcmAttr::ProcEventType(event_type) => Some(*event_type),
             _ => None,
         })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_FILE_OPERATION"))
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PROC_EVENT_TYPE"))
     }
 
-    pub fn exit_pid(&self) -> Result<i32, DecodeError> {
+    pub fn ppid(&self) -> Result<i32, DecodeError> {
         self.find_i32(|attr| match attr {
-            TcmAttr::ExitPid(pid) => Some(*pid),
+            TcmAttr::Ppid(pid) => Some(*pid),
             _ => None,
         })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_EXIT_PID"))
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PPID"))
     }
 
-    pub fn exit_code(&self) -> Result<i32, DecodeError> {
+    pub fn pid(&self) -> Result<i32, DecodeError> {
         self.find_i32(|attr| match attr {
-            TcmAttr::ExitCode(code) => Some(*code),
+            TcmAttr::Pid(pid) => Some(*pid),
             _ => None,
         })
-        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_EXIT_CODE"))
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PID"))
+    }
+
+    pub fn file_event_type(&self) -> Result<u8, DecodeError> {
+        self.find_u8(|attr| match attr {
+            TcmAttr::FileEventType(t) => Some(*t),
+            _ => None,
+        })
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_FILE_EVENT_TYPE"))
+    }
+
+    pub fn fd(&self) -> Result<i32, DecodeError> {
+        self.find_i32(|attr| match attr {
+            TcmAttr::Fd(fd) => Some(*fd),
+            _ => None,
+        })
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_FD"))
+    }
+
+    #[allow(dead_code)]
+    pub fn key(&self) -> Result<String, DecodeError> {
+        self.find_string(|attr| match attr {
+            TcmAttr::Key(key) => Some(key.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_KEY"))
+    }
+
+    pub fn path1(&self) -> Result<String, DecodeError> {
+        self.find_string(|attr| match attr {
+            TcmAttr::Path1(path) => Some(path.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PATH1"))
+    }
+
+    #[allow(dead_code)]
+    pub fn path2(&self) -> Result<String, DecodeError> {
+        self.find_string(|attr| match attr {
+            TcmAttr::Path2(path) => Some(path.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| DecodeError::from("missing TCM_ATTR_PATH2"))
     }
 
     pub fn file_stats_pid_table_size(&self) -> Result<u32, DecodeError> {
@@ -277,60 +260,65 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmFileStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcmForkRetEvent {
-    pub parent_pid: i32,
-    pub child_pid: i32,
+pub enum TcmProcEventType {
+    Fork,
+    Exec,
+    Exit,
 }
 
-impl TryFrom<GenlMessage<TcmPayload>> for TcmForkRetEvent {
+impl TryFrom<u8> for TcmProcEventType {
     type Error = DecodeError;
 
-    fn try_from(value: GenlMessage<TcmPayload>) -> Result<Self, Self::Error> {
-        value.payload.expect_event(TcmEventCmd::ForkRetEvent)?;
-
-        Ok(TcmForkRetEvent {
-            parent_pid: value.payload.parent_pid()?,
-            child_pid: value.payload.child_pid()?,
-        })
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(TcmProcEventType::Fork),
+            2 => Ok(TcmProcEventType::Exec),
+            3 => Ok(TcmProcEventType::Exit),
+            other => Err(DecodeError::from(format!(
+                "unknown TCM proc event type: {other} while parsing TcmProcEventType"
+            ))),
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcmExitEvent {
+pub struct TcmProcEvent {
+    pub event_type: TcmProcEventType,
+    pub ppid: i32,
     pub pid: i32,
-    pub code: i32,
 }
 
-impl TryFrom<GenlMessage<TcmPayload>> for TcmExitEvent {
+impl TryFrom<GenlMessage<TcmPayload>> for TcmProcEvent {
     type Error = DecodeError;
 
     fn try_from(value: GenlMessage<TcmPayload>) -> Result<Self, Self::Error> {
-        value.payload.expect_event(TcmEventCmd::ExitEvent)?;
+        value.payload.expect_event(TcmEventCmd::ProcEvent)?;
 
-        Ok(TcmExitEvent {
-            pid: value.payload.exit_pid()?,
-            code: value.payload.exit_code()?,
+        Ok(TcmProcEvent {
+            event_type: TcmProcEventType::try_from(value.payload.proc_event_type()?)?,
+            ppid: value.payload.ppid()?,
+            pid: value.payload.pid()?,
         })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TcmFileOp {
+pub enum TcmFileEventType {
     Open,
     Write,
     Close,
 }
 
-impl TryFrom<u8> for TcmFileOp {
+impl TryFrom<u8> for TcmFileEventType {
     type Error = DecodeError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(TcmFileOp::Open),
-            2 => Ok(TcmFileOp::Write),
-            3 => Ok(TcmFileOp::Close),
+            1 => Ok(TcmFileEventType::Open),
+            2 => Ok(TcmFileEventType::Write),
+            3 => Ok(TcmFileEventType::Close),
             other => Err(DecodeError::from(format!(
-                "unknown TCM file operation: {other}"
+                "unknown TCM file event type: {other} while parsing TcmFileEventType"
             ))),
         }
     }
@@ -338,10 +326,10 @@ impl TryFrom<u8> for TcmFileOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcmFileEvent {
-    pub pid: i32,
+    pub event_type: TcmFileEventType,
     pub fd: i32,
-    pub operation: TcmFileOp,
-    pub path: String,
+    pub pid: i32,
+    pub path1: String,
 }
 
 impl TryFrom<GenlMessage<TcmPayload>> for TcmFileEvent {
@@ -350,25 +338,25 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmFileEvent {
     fn try_from(value: GenlMessage<TcmPayload>) -> Result<Self, Self::Error> {
         value.payload.expect_event(TcmEventCmd::FileEvent)?;
 
-        let pid = value.payload.file_pid()?;
-        let fd = value.payload.file_fd()?;
-        let path = value.payload.file_path()?;
-        let operation = TcmFileOp::try_from(value.payload.file_operation()?)?;
+        let pid = value.payload.pid()?;
+        let fd = value.payload.fd()?;
+        let path1 = value.payload.path1()?;
+        // let path2 = value.payload.path2()?;
+        let event_type = TcmFileEventType::try_from(value.payload.file_event_type()?)?;
 
         Ok(TcmFileEvent {
-            pid,
+            event_type,
             fd,
-            operation,
-            path,
+            pid,
+            path1,
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TcmEvent {
-    ForkRet(TcmForkRetEvent),
     File(TcmFileEvent),
-    Exit(TcmExitEvent),
+    Proc(TcmProcEvent),
     FileStats(TcmFileStats),
 }
 
@@ -377,11 +365,8 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmEvent {
 
     fn try_from(value: GenlMessage<TcmPayload>) -> Result<Self, Self::Error> {
         match value.payload.event_command() {
-            Ok(TcmEventCmd::ForkRetEvent) => {
-                TcmForkRetEvent::try_from(value).map(TcmEvent::ForkRet)
-            }
+            Ok(TcmEventCmd::ProcEvent) => TcmProcEvent::try_from(value).map(TcmEvent::Proc),
             Ok(TcmEventCmd::FileEvent) => TcmFileEvent::try_from(value).map(TcmEvent::File),
-            Ok(TcmEventCmd::ExitEvent) => TcmExitEvent::try_from(value).map(TcmEvent::Exit),
             Ok(TcmEventCmd::FileStatsEvent) => {
                 TcmFileStats::try_from(value).map(TcmEvent::FileStats)
             }
@@ -391,9 +376,8 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmEvent {
 }
 
 pub trait TcmEventHandler: Send + Sync {
-    fn on_fork_ret(&self, _event: TcmForkRetEvent) {}
     fn on_file(&self, _event: TcmFileEvent) {}
-    fn on_exit(&self, _event: TcmExitEvent) {}
+    fn on_proc(&self, _event: TcmProcEvent) {}
     fn on_file_stats(&self, _event: TcmFileStats) {}
 }
 
@@ -428,9 +412,8 @@ fn handle_netlink_message(
 
 fn dispatch_event(handler: &dyn TcmEventHandler, event: TcmEvent) {
     match event {
-        TcmEvent::ForkRet(event) => handler.on_fork_ret(event),
+        TcmEvent::Proc(event) => handler.on_proc(event),
         TcmEvent::File(event) => handler.on_file(event),
-        TcmEvent::Exit(event) => handler.on_exit(event),
         TcmEvent::FileStats(event) => handler.on_file_stats(event),
     }
 }

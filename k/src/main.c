@@ -1,18 +1,17 @@
+#include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/errno.h>
 
 /*
  * 模块主入口，负责协调各类监听器与 Netlink 通道的生命周期。
  * 该文件中仅保留最小化的初始化与清理流程，方便在内核态快速定位问题。
  */
 
-#include "tcm/listeners/exit.h"
-#include "tcm/listeners/file.h"
-#include "tcm/listeners/forkret.h"
-#include "tcm/netlink/genl.h"
+#include "tcm/genl.h"
+#include "tcm/kprobes/file.h"
+#include "tcm/kprobes/proc.h"
 #include "tcm/whitelist/file.h"
 
 MODULE_LICENSE("GPL");
@@ -21,9 +20,8 @@ MODULE_DESCRIPTION("TCM-Team Module");
 MODULE_VERSION("1.0.0");
 
 /* 模块内部持有的监听器与通用 netlink 核心句柄，模块卸载时按需释放。 */
-static exit_listener_t *s_exit_listener = NULL;
 static file_listener_t *s_file_listener = NULL;
-static fork_ret_listener_t *s_fork_ret_listener = NULL;
+static proc_listener_t *s_proc_listener = NULL;
 static genl_core_t *s_genl_core = NULL;
 
 /* 通过 module_param_cb 导出 file_listener 的实时统计信息。 */
@@ -56,8 +54,7 @@ static int file_listener_stats_param_get(char *buffer,
                    stats.file_entry_count);
 
   if (stats.top_pid_count == 0) {
-    len += scnprintf(buffer + len, PAGE_SIZE - len,
-                     "(no active processes)\n");
+    len += scnprintf(buffer + len, PAGE_SIZE - len, "(no active processes)\n");
     return len;
   }
 
@@ -101,14 +98,8 @@ static int tcm_init_impl(void) {
     return ret;
   }
 
-  ret = exit_listener_init(&s_exit_listener, genl_core_on_exit_event,
+  ret = proc_listener_init(&s_proc_listener, genl_core_on_proc_event,
                            s_genl_core);
-  if (ret) {
-    return ret;
-  }
-
-  ret = fork_ret_listener_init(&s_fork_ret_listener,
-                               genl_core_on_fork_ret_event, s_genl_core);
   if (ret) {
     return ret;
   }
@@ -121,9 +112,8 @@ static void tcm_exit_impl(void) {
   if (s_genl_core) {
     genl_core_set_file_listener(s_genl_core, NULL);
   }
-  exit_listener_exit(&s_exit_listener);
+  proc_listener_exit(&s_proc_listener);
   file_listener_exit(&s_file_listener);
-  fork_ret_listener_exit(&s_fork_ret_listener);
   genl_core_exit(&s_genl_core);
   file_whitelist_exit();
 }
