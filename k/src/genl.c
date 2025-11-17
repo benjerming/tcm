@@ -1,9 +1,11 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/limits.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <net/genetlink.h>
 #include <net/netlink.h>
@@ -21,6 +23,11 @@
  *  - 提供白名单与统计信息的控制接口
  */
 
+typedef struct {
+  struct list_head node;
+  u32 portid;
+} genl_core_client_t;
+
 /* genetlink 核心上下文，封装 family、ops、监听器等状态。 */
 struct genl_core {
   struct nla_policy policy[TCM_GENL_ATTR_MAX];
@@ -28,15 +35,15 @@ struct genl_core {
   struct genl_ops ops[TCM_GENL_CMD_OPS_COUNT];
   struct genl_family family;
   file_listener_t *file_listener;
+  struct list_head clients;
+  spinlock_t clients_lock;
 };
 
-/* 处理客户端注册请求，将调用方 PID 加入白名单。 */
-static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
+static int genl_core_get_from_info(struct genl_info *info,
+                                   genl_core_t **out_core) {
   genl_core_t *core;
-  int ret;
-  const char *key = NULL;
 
-  if (!info) {
+  if (!info || !info->family) {
     pr_warn("%s: invalid genl_info\n", __func__);
     return -EINVAL;
   }
@@ -45,6 +52,125 @@ static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
   if (!core) {
     pr_warn("%s: genl_core not initialized\n", __func__);
     return -EINVAL;
+  }
+
+  if (out_core) {
+    *out_core = core;
+  }
+
+  return 0;
+}
+
+static bool genl_core_clients_contains_locked(genl_core_t *core, u32 portid) {
+  genl_core_client_t *client;
+
+  list_for_each_entry(client, &core->clients, node) {
+    if (client->portid == portid) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool genl_core_clients_contains(genl_core_t *core, u32 portid) {
+  unsigned long flags;
+  bool found;
+
+  if (!core) {
+    return false;
+  }
+
+  spin_lock_irqsave(&core->clients_lock, flags);
+  found = genl_core_clients_contains_locked(core, portid);
+  spin_unlock_irqrestore(&core->clients_lock, flags);
+
+  return found;
+}
+
+static int genl_core_clients_add(genl_core_t *core, u32 portid) {
+  genl_core_client_t *client;
+  unsigned long flags;
+
+  if (!core) {
+    return -EINVAL;
+  }
+
+  spin_lock_irqsave(&core->clients_lock, flags);
+  if (genl_core_clients_contains_locked(core, portid)) {
+    spin_unlock_irqrestore(&core->clients_lock, flags);
+    return -EEXIST;
+  }
+  spin_unlock_irqrestore(&core->clients_lock, flags);
+
+  client = kmalloc(sizeof(*client), GFP_KERNEL);
+  if (!client) {
+    return -ENOMEM;
+  }
+
+  client->portid = portid;
+  INIT_LIST_HEAD(&client->node);
+
+  spin_lock_irqsave(&core->clients_lock, flags);
+  if (genl_core_clients_contains_locked(core, portid)) {
+    spin_unlock_irqrestore(&core->clients_lock, flags);
+    kfree(client);
+    return -EEXIST;
+  }
+
+  list_add_tail(&client->node, &core->clients);
+  spin_unlock_irqrestore(&core->clients_lock, flags);
+
+  return 0;
+}
+
+static void genl_core_clients_clear(genl_core_t *core) {
+  genl_core_client_t *client, *tmp;
+  unsigned long flags;
+
+  if (!core) {
+    return;
+  }
+
+  spin_lock_irqsave(&core->clients_lock, flags);
+  list_for_each_entry_safe(client, tmp, &core->clients, node) {
+    list_del(&client->node);
+    kfree(client);
+  }
+  spin_unlock_irqrestore(&core->clients_lock, flags);
+}
+
+static int genl_core_require_client_login(struct genl_info *info,
+                                          genl_core_t **out_core) {
+  genl_core_t *core;
+  int ret;
+
+  ret = genl_core_get_from_info(info, &core);
+  if (ret) {
+    return ret;
+  }
+
+  if (!genl_core_clients_contains(core, info->snd_portid)) {
+    pr_warn("%s: client pid=%d not logged in\n", __func__, info->snd_portid);
+    return -EACCES;
+  }
+
+  if (out_core) {
+    *out_core = core;
+  }
+
+  return 0;
+}
+
+/* 处理客户端注册请求，将调用方 PID 加入白名单。 */
+static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
+  genl_core_t *core;
+  int ret;
+  const char *key = NULL;
+
+  ret = genl_core_get_from_info(info, &core);
+  if (ret) {
+    return ret;
   }
 
   if (info->attrs[TCM_GENL_ATTR_KEY]) {
@@ -58,6 +184,13 @@ static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
   if (strcmp(key, "1234567890") != 0) {
     pr_warn("%s: invalid key\n", __func__);
     return -EINVAL;
+  }
+
+  ret = genl_core_clients_add(core, info->snd_portid);
+  if (ret != 0 && ret != -EEXIST) {
+    pr_warn("%s: failed to add client pid=%d: %d\n", __func__, info->snd_portid,
+            ret);
+    return ret;
   }
 
   ret = pid_whitelist_add(info->snd_portid);
@@ -81,15 +214,9 @@ static int genl_core_handle_get_file_stats(struct sk_buff *skb,
   int ret;
   size_t top_pids_len;
 
-  if (!info) {
-    pr_warn("%s: invalid genl_info\n", __func__);
-    return -EINVAL;
-  }
-
-  core = container_of(info->family, genl_core_t, family);
-  if (!core) {
-    pr_warn("%s: genl_core not initialized\n", __func__);
-    return -EINVAL;
+  ret = genl_core_require_client_login(info, &core);
+  if (ret) {
+    return ret;
   }
 
   if (!core->file_listener) {
@@ -198,6 +325,11 @@ static int genl_core_handle_file_whitelist_add(struct sk_buff *skb,
   const char *path;
   int ret;
 
+  ret = genl_core_require_client_login(info, NULL);
+  if (ret) {
+    return ret;
+  }
+
   /* 从报文中解析出目标白名单路径。 */
   ret = genl_core_parse_file_whitelist(info, &path);
   if (ret) {
@@ -219,6 +351,11 @@ static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
   const char *path;
   int ret;
 
+  ret = genl_core_require_client_login(info, NULL);
+  if (ret) {
+    return ret;
+  }
+
   /* 与添加路径共用解析逻辑，确保输入一致性。 */
   ret = genl_core_parse_file_whitelist(info, &path);
   if (ret) {
@@ -237,6 +374,13 @@ static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
 
 static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
                                                struct genl_info *info) {
+  int ret;
+
+  ret = genl_core_require_client_login(info, NULL);
+  if (ret) {
+    return ret;
+  }
+
   // TODO
   // const char *path;
   // int ret;
@@ -251,6 +395,13 @@ static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
 
 static int genl_core_handle_proc_whitelist_remove(struct sk_buff *skb,
                                                   struct genl_info *info) {
+  int ret;
+
+  ret = genl_core_require_client_login(info, NULL);
+  if (ret) {
+    return ret;
+  }
+
   // TODO
   // const char *path;
   // int ret;
@@ -283,6 +434,9 @@ int genl_core_init(genl_core_t **core) {
     pr_warn("%s: failed to kmalloc genl_core\n", __func__);
     return -ENOMEM;
   }
+
+  INIT_LIST_HEAD(&(*core)->clients);
+  spin_lock_init(&(*core)->clients_lock);
 
   /* 在栈上准备策略、组和命令的模板配置。 */
   struct nla_policy policy[TCM_GENL_ATTR_MAX] = {
@@ -402,6 +556,7 @@ void genl_core_exit(genl_core_t **core) {
   pr_info("%s\n", __func__);
 
   genl_unregister_family(&(*core)->family);
+  genl_core_clients_clear(*core);
 
   kfree(*core);
   *core = NULL;
