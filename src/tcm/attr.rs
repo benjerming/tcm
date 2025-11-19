@@ -1,14 +1,9 @@
 use netlink_packet_core::{
-    DecodeError, ErrorContext, Nla, NlaBuffer, Parseable, emit_u32, parse_u32,
+    DecodeError, ErrorContext, NLA_F_NESTED, Nla, NlaBuffer, NlasIterator, Parseable, emit_u32,
+    parse_u32,
 };
 
-use super::constants::{
-    TCM_GENL_ATTR_FD, TCM_GENL_ATTR_FILE_EVENT_TYPE, TCM_GENL_ATTR_FILE_STATS_FILE_ENTRY_COUNT,
-    TCM_GENL_ATTR_FILE_STATS_PID_ENTRY_COUNT, TCM_GENL_ATTR_FILE_STATS_PID_TABLE_SIZE,
-    TCM_GENL_ATTR_FILE_STATS_TOP_PID_COUNT, TCM_GENL_ATTR_FILE_STATS_TOP_PIDS, TCM_GENL_ATTR_KEY,
-    TCM_GENL_ATTR_KEY_MAX_LEN, TCM_GENL_ATTR_PATH1, TCM_GENL_ATTR_PATH2, TCM_GENL_ATTR_PID,
-    TCM_GENL_ATTR_PPID, TCM_GENL_ATTR_PROC_EVENT_TYPE,
-};
+use super::constants::*;
 use super::message::{FILE_LISTENER_PID_STAT_SIZE, FileListenerPidStat};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +12,8 @@ pub enum TcmAttr {
     Fd(i32),
     Pid(i32),
     Ppid(i32),
+    PathList(Vec<String>),
+    ProcList(Vec<i32>),
     ProcEventType(u8),
     FileEventType(u8),
     Path1(String),
@@ -27,8 +24,20 @@ pub enum TcmAttr {
     FileStatsFileEntryCount(u32),
     FileStatsTopPidCount(u32),
     FileStatsTopPids(Vec<FileListenerPidStat>),
-    FileWhitelistPath(String),
 }
+
+// #[derive(Debug, Clone, PartialEq, Eq)]
+// pub enum TcmProcListEntry {
+//     Proc(i32),
+//     ProcTree(i32),
+// }
+
+// #[derive(Debug, Clone, PartialEq, Eq)]
+// pub enum TcmPathListEntry {
+//     Path(String),
+// }
+
+const NLA_HEADER_LEN: usize = 4;
 
 impl TcmAttr {
     fn parse_u8(payload: &[u8]) -> Result<u8, DecodeError> {
@@ -69,6 +78,18 @@ impl TcmAttr {
         }
         buffer[..4].copy_from_slice(&value.to_ne_bytes());
     }
+
+    fn nla_attr_len(payload_len: usize) -> usize {
+        NLA_HEADER_LEN + payload_len
+    }
+
+    fn nla_align(len: usize) -> usize {
+        (len + 3) & !3
+    }
+
+    fn nested_entry_total_len(payload_len: usize) -> usize {
+        Self::nla_align(Self::nla_attr_len(payload_len))
+    }
 }
 
 impl Nla for TcmAttr {
@@ -86,7 +107,11 @@ impl Nla for TcmAttr {
             TcmAttr::Path1(value) => value.len() + 1,
             TcmAttr::Path2(value) => value.len() + 1,
             TcmAttr::FileStatsTopPids(values) => values.len() * FILE_LISTENER_PID_STAT_SIZE,
-            TcmAttr::FileWhitelistPath(value) => value.len() + 1,
+            TcmAttr::PathList(items) => items
+                .iter()
+                .map(|item| Self::nested_entry_total_len(item.len() + 1))
+                .sum(),
+            TcmAttr::ProcList(items) => items.iter().map(|_| Self::nested_entry_total_len(4)).sum(),
         }
     }
 
@@ -105,7 +130,8 @@ impl Nla for TcmAttr {
             TcmAttr::FileStatsFileEntryCount(_) => TCM_GENL_ATTR_FILE_STATS_FILE_ENTRY_COUNT,
             TcmAttr::FileStatsTopPidCount(_) => TCM_GENL_ATTR_FILE_STATS_TOP_PID_COUNT,
             TcmAttr::FileStatsTopPids(_) => TCM_GENL_ATTR_FILE_STATS_TOP_PIDS,
-            TcmAttr::FileWhitelistPath(_) => TCM_GENL_ATTR_PATH1,
+            TcmAttr::PathList(_) => TCM_GENL_ATTR_PATH_LIST | NLA_F_NESTED,
+            TcmAttr::ProcList(_) => TCM_GENL_ATTR_PROC_LIST | NLA_F_NESTED,
         }
     }
 
@@ -144,11 +170,48 @@ impl Nla for TcmAttr {
                     buffer[offset + 4..offset + 8].copy_from_slice(&stat.file_count.to_ne_bytes());
                 }
             }
-            TcmAttr::FileWhitelistPath(value) => {
-                let bytes = value.as_bytes();
-                let len = bytes.len().min(buffer.len().saturating_sub(1));
-                buffer.fill(0);
-                buffer[..len].copy_from_slice(&bytes[..len]);
+            TcmAttr::PathList(values) => {
+                let mut offset = 0;
+                for value in values {
+                    let payload_len = value.len() + 1;
+                    let attr_len = Self::nla_attr_len(payload_len);
+                    let aligned_len = Self::nla_align(attr_len);
+
+                    let slice = &mut buffer[offset..offset + aligned_len];
+                    slice.fill(0);
+
+                    slice[..2].copy_from_slice(&(attr_len as u16).to_ne_bytes());
+                    slice[2..4].copy_from_slice(&TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY.to_ne_bytes());
+
+                    let bytes = value.as_bytes();
+                    let copy_len = bytes.len().min(payload_len.saturating_sub(1));
+                    slice[4..4 + copy_len].copy_from_slice(&bytes[..copy_len]);
+
+                    offset += aligned_len;
+                }
+            }
+            TcmAttr::ProcList(values) => {
+                let mut offset = 0;
+                for value in values {
+                    let payload_len = 4;
+                    let attr_len = Self::nla_attr_len(payload_len);
+                    let aligned_len = Self::nla_align(attr_len);
+
+                    let slice = &mut buffer[offset..offset + aligned_len];
+                    slice.fill(0);
+
+                    slice[..2].copy_from_slice(&(attr_len as u16).to_ne_bytes());
+
+                    let (attr_type, payload_value) = if *value >= 0 {
+                        (TCM_GENL_PROC_LIST_ATTR_PROC_TREE_ENTRY, *value)
+                    } else {
+                        (TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY, value.abs())
+                    };
+                    slice[2..4].copy_from_slice(&attr_type.to_ne_bytes());
+                    Self::emit_i32(&mut slice[4..4 + payload_len], payload_value);
+
+                    offset += aligned_len;
+                }
             }
         }
     }
@@ -217,6 +280,42 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for TcmAttr {
                 }
 
                 Ok(TcmAttr::FileStatsTopPids(stats))
+            }
+            TCM_GENL_ATTR_PATH_LIST => {
+                let mut paths = Vec::new();
+                for nested in NlasIterator::new(payload) {
+                    let nla =
+                        nested.context("failed to parse nested attr in TCM_ATTR_PATH_LIST")?;
+                    if nla.kind() != TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY {
+                        continue;
+                    }
+                    let value = nla.value();
+                    let len = value.iter().position(|&b| b == 0).unwrap_or(value.len());
+                    let path = String::from_utf8_lossy(&value[..len]).into_owned();
+                    paths.push(path);
+                }
+
+                Ok(TcmAttr::PathList(paths))
+            }
+            TCM_GENL_ATTR_PROC_LIST => {
+                let mut procs = Vec::new();
+                for nested in NlasIterator::new(payload) {
+                    let nla =
+                        nested.context("failed to parse nested attr in TCM_ATTR_PROC_LIST")?;
+                    let value_bytes = nla.value();
+                    if value_bytes.len() < 4 {
+                        continue;
+                    }
+                    let mut value_arr = [0u8; 4];
+                    value_arr.copy_from_slice(&value_bytes[..4]);
+                    let value = i32::from_ne_bytes(value_arr);
+                    match nla.kind() {
+                        TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY => procs.push(-value.abs()),
+                        TCM_GENL_PROC_LIST_ATTR_PROC_TREE_ENTRY => procs.push(value.abs()),
+                        _ => continue,
+                    }
+                }
+                Ok(TcmAttr::ProcList(procs))
             }
             kind => Err(DecodeError::from(format!("unknown TCM attr: {kind}"))),
         }

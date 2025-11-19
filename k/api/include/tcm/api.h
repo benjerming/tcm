@@ -57,6 +57,8 @@ enum tcm_genl_attr {
   TCM_GENL_ATTR_KEY,
   TCM_GENL_ATTR_PATH1,
   TCM_GENL_ATTR_PATH2,
+  TCM_GENL_ATTR_PATH_LIST,
+  TCM_GENL_ATTR_PROC_LIST,
   TCM_GENL_ATTR_FILE_EVENT_TYPE,
   TCM_GENL_ATTR_PROC_EVENT_TYPE,
   TCM_GENL_ATTR_FILE_STATS_PID_TABLE_SIZE,
@@ -66,6 +68,37 @@ enum tcm_genl_attr {
   TCM_GENL_ATTR_FILE_STATS_TOP_PIDS,
   TCM_GENL_ATTR_MAX,
 };
+
+enum tcm_genl_path_list_attr {
+  TCM_GENL_PATH_LIST_ATTR_UNSPEC,
+  TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY,
+  __TCM_GENL_PATH_LIST_ATTR_MAX,
+};
+#define TCM_GENL_PATH_LIST_ATTR_MAX (__TCM_GENL_PATH_LIST_ATTR_MAX)
+
+enum tcm_genl_proc_list_attr {
+  TCM_GENL_PROC_LIST_ATTR_UNSPEC,
+  TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY,
+  TCM_GENL_PROC_LIST_ATTR_PROC_TREE_ENTRY,
+  __TCM_GENL_PROC_LIST_ATTR_MAX,
+};
+#define TCM_GENL_PROC_LIST_ATTR_MAX (__TCM_GENL_PROC_LIST_ATTR_MAX)
+
+typedef struct {
+  char key[TCM_GENL_ATTR_KEY_MAX_LEN];
+} login_op_t;
+
+typedef struct {
+  const char **paths;
+} file_whitelist_add_op_t;
+
+typedef file_whitelist_add_op_t file_whitelist_remove_op_t;
+
+typedef struct {
+  s32 *procs;
+} proc_whitelist_add_op_t;
+
+typedef proc_whitelist_add_op_t proc_whitelist_remove_op_t;
 
 /* genetlink 多播组。 */
 enum tcm_genl_mcgrp {

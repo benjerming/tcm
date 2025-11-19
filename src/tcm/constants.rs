@@ -42,7 +42,6 @@ macro_rules! const_u16_from_module {
     };
 }
 
-const_u8_from_module!(#[allow(dead_code)] pub(crate) tcm_genl_cmd::TCM_GENL_CMD_UNSPEC);
 const_u8_from_module!(pub(crate) tcm_genl_cmd::TCM_GENL_CMD_FILE_EVENT);
 const_u8_from_module!(pub(crate) tcm_genl_cmd::TCM_GENL_CMD_PROC_EVENT);
 const_u8_from_module!(pub(crate) tcm_genl_cmd::TCM_GENL_CMD_FILE_STATS_EVENT);
@@ -50,28 +49,32 @@ const_u8_from_module!(pub(crate) tcm_genl_cmd::TCM_GENL_CMD_FILE_STATS_EVENT);
 pub(crate) const TCM_GENL_OP_LOGIN: u8 = bindings::tcm_genl_cmd::TCM_GENL_CMD_LOGIN as u8;
 pub(crate) const TCM_GENL_OP_GET_FILE_STATS: u8 =
     bindings::tcm_genl_cmd::TCM_GENL_CMD_GET_FILE_STATS as u8;
-pub(crate) const TCM_GENL_OP_PROC_WHITELIST_ADD: u8 =
-    bindings::tcm_genl_cmd::TCM_GENL_CMD_PROC_WHITELIST_ADD as u8;
-pub(crate) const TCM_GENL_OP_PROC_WHITELIST_REMOVE: u8 =
-    bindings::tcm_genl_cmd::TCM_GENL_CMD_PROC_WHITELIST_REMOVE as u8;
 pub(crate) const TCM_GENL_OP_FILE_WHITELIST_ADD: u8 =
     bindings::tcm_genl_cmd::TCM_GENL_CMD_FILE_WHITELIST_ADD as u8;
 pub(crate) const TCM_GENL_OP_FILE_WHITELIST_REMOVE: u8 =
     bindings::tcm_genl_cmd::TCM_GENL_CMD_FILE_WHITELIST_REMOVE as u8;
+pub(crate) const TCM_GENL_OP_PROC_WHITELIST_ADD: u8 =
+    bindings::tcm_genl_cmd::TCM_GENL_CMD_PROC_WHITELIST_ADD as u8;
+pub(crate) const TCM_GENL_OP_PROC_WHITELIST_REMOVE: u8 =
+    bindings::tcm_genl_cmd::TCM_GENL_CMD_PROC_WHITELIST_REMOVE as u8;
 
 pub(crate) const TCM_GENL_ATTR_KEY_MAX_LEN: usize = bindings::TCM_GENL_ATTR_KEY_MAX_LEN as usize;
 
-const_u16_from_module!(#[allow(dead_code)] pub(crate) tcm_genl_attr::TCM_GENL_ATTR_UNSPEC);
-const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PROC_EVENT_TYPE);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FD);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_KEY);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PID);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PPID);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PATH1);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PATH2);
+const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PATH_LIST);
+const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PROC_LIST);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FILE_EVENT_TYPE);
+const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_PROC_EVENT_TYPE);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FILE_STATS_PID_TABLE_SIZE);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FILE_STATS_PID_ENTRY_COUNT);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FILE_STATS_FILE_ENTRY_COUNT);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FILE_STATS_TOP_PID_COUNT);
 const_u16_from_module!(pub(crate) tcm_genl_attr::TCM_GENL_ATTR_FILE_STATS_TOP_PIDS);
+const_u16_from_module!(pub(crate) tcm_genl_path_list_attr::TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY);
+const_u16_from_module!(pub(crate) tcm_genl_proc_list_attr::TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY);
+const_u16_from_module!(pub(crate) tcm_genl_proc_list_attr::TCM_GENL_PROC_LIST_ATTR_PROC_TREE_ENTRY);

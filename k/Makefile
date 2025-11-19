@@ -2,11 +2,12 @@ obj-m += tcm.o
 
 tcm-y := src/main.o \
 	src/genl.o \
+	src/login.o \
 	src/kprobes/core.o \
 	src/kprobes/file.o \
 	src/kprobes/proc.o \
-	src/whitelist/pid.o \
-	src/whitelist/file.o
+	src/whitelist/file.o \
+	src/whitelist/proc.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 MO ?= $(CURDIR)/build

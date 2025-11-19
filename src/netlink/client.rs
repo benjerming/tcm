@@ -6,7 +6,7 @@ use netlink_packet_core::{
 };
 use netlink_packet_generic::GenlMessage;
 
-use crate::tcm::{TcmAttr, TcmCommand, TcmFileStats, TcmOperateCmd, TcmPayload};
+use crate::tcm::*;
 
 pub struct TcmGenlClient {
     handle: GenetlinkHandle,
@@ -126,28 +126,93 @@ impl TcmGenlClient {
         .map(|_| ())
     }
 
-    pub async fn get_file_monitor_stats(&mut self) -> Result<TcmFileStats> {
+    pub async fn get_file_monitor_stats(&mut self) -> Result<TcmFileMonitorStats> {
         self.get(
             TcmCommand::Operation(TcmOperateCmd::GetFileStats),
             Vec::new(),
-            |genl_msg| TcmFileStats::try_from(genl_msg).context("解析GenlMessage->TcmFileStats"),
+            |genl_msg| {
+                TcmFileMonitorStats::try_from(genl_msg).context("解析GenlMessage->TcmFileStats")
+            },
         )
         .await
     }
 
-    pub async fn put_file_whitelist(&mut self, path: &str) -> Result<()> {
-        let mut nlas = Vec::with_capacity(2);
-        nlas.push(TcmAttr::FileWhitelistPath(path.to_owned()));
-        self.put(TcmOperateCmd::FileWhitelistAdd, nlas)
+    pub async fn put_trust_path(&mut self, path: &str) -> Result<()> {
+        self.put_trust_path_list(std::iter::once(path)).await
+    }
+
+    pub async fn put_trust_path_list<I, S>(&mut self, paths: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let entries = Self::collect_path_list(paths)?;
+        self.send_trust_path_list(entries, TcmOperateCmd::FileWhitelistAdd)
+            .await
+    }
+
+    pub async fn distrust_path(&mut self, path: &str) -> Result<()> {
+        self.distrust_path_list(std::iter::once(path)).await
+    }
+
+    pub async fn distrust_path_list<I, S>(&mut self, paths: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let entries = Self::collect_path_list(paths)?;
+        self.send_trust_path_list(entries, TcmOperateCmd::FileWhitelistRemove)
+            .await
+    }
+
+    pub async fn put_trust_proc_list(
+        &mut self,
+        procs: Vec<i32>,
+        include_children: bool,
+    ) -> Result<()> {
+        let nlas = if include_children {
+            vec![TcmAttr::ProcList(procs)]
+        } else {
+            vec![TcmAttr::ProcList(procs.into_iter().map(|p| -p).collect())]
+        };
+        self.put(TcmOperateCmd::ProcWhitelistAdd, nlas)
             .await
             .map(|_| ())
     }
 
-    pub async fn delete_file_whitelist(&mut self, path: &str) -> Result<()> {
+    pub async fn distrust_proc(&mut self, pid: i32, include_children: bool) -> Result<()> {
         let mut nlas = Vec::with_capacity(2);
-        nlas.push(TcmAttr::FileWhitelistPath(path.to_owned()));
-        self.put(TcmOperateCmd::FileWhitelistRemove, nlas)
+        if include_children {
+            nlas.push(TcmAttr::ProcList(vec![pid]));
+        } else {
+            nlas.push(TcmAttr::ProcList(vec![-pid]));
+        }
+        self.put(TcmOperateCmd::ProcWhitelistRemove, nlas)
             .await
             .map(|_| ())
+    }
+
+    fn collect_path_list<I, S>(paths: I) -> Result<Vec<String>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut entries = Vec::new();
+        for raw in paths {
+            let path = raw.as_ref();
+            anyhow::ensure!(!path.is_empty(), "路径列表不能包含空字符串");
+            entries.push(path.to_owned());
+        }
+        anyhow::ensure!(!entries.is_empty(), "路径列表不能为空");
+        Ok(entries)
+    }
+
+    async fn send_trust_path_list(
+        &mut self,
+        entries: Vec<String>,
+        op: TcmOperateCmd,
+    ) -> Result<()> {
+        let nlas = vec![TcmAttr::PathList(entries)];
+        self.put(op, nlas).await.map(|_| ())
     }
 }

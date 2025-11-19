@@ -20,7 +20,7 @@
 #include "tcm/kprobes/core.h"
 #include "tcm/kprobes/file.h"
 #include "tcm/whitelist/file.h"
-#include "tcm/whitelist/pid.h"
+#include "tcm/whitelist/proc.h"
 
 /*
  * 文件事件监听器：
@@ -525,7 +525,7 @@ static int queue_file_event(file_listener_t *listener,
   pid = task_tgid_nr(current);
 
   /* PID 在白名单中时直接忽略并归还引用。 */
-  if (pid_whitelist_contains(pid)) {
+  if (proc_whitelist_contains(pid)) {
     if (file) {
       fput(file);
     }

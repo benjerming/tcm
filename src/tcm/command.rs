@@ -2,13 +2,7 @@ use std::convert::TryFrom;
 
 use netlink_packet_core::DecodeError;
 
-use crate::tcm::constants::TCM_GENL_CMD_PROC_EVENT;
-
-use crate::tcm::constants::{
-    TCM_GENL_CMD_FILE_EVENT, TCM_GENL_CMD_FILE_STATS_EVENT, TCM_GENL_OP_FILE_WHITELIST_ADD,
-    TCM_GENL_OP_FILE_WHITELIST_REMOVE, TCM_GENL_OP_GET_FILE_STATS, TCM_GENL_OP_LOGIN,
-    TCM_GENL_OP_PROC_WHITELIST_ADD, TCM_GENL_OP_PROC_WHITELIST_REMOVE,
-};
+use crate::tcm::constants::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcmEventCmd {

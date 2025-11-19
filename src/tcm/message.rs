@@ -22,7 +22,7 @@ pub struct FileListenerPidStat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcmFileStats {
+pub struct TcmFileMonitorStats {
     pub pid_table_size: u32,
     pub pid_entry_count: u32,
     pub file_entry_count: u32,
@@ -229,7 +229,7 @@ impl ParseableParametrized<[u8], GenlHeader> for TcmPayload {
     }
 }
 
-impl TryFrom<GenlMessage<TcmPayload>> for TcmFileStats {
+impl TryFrom<GenlMessage<TcmPayload>> for TcmFileMonitorStats {
     type Error = DecodeError;
 
     fn try_from(value: GenlMessage<TcmPayload>) -> Result<Self, Self::Error> {
@@ -249,7 +249,7 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmFileStats {
             )));
         }
 
-        Ok(TcmFileStats {
+        Ok(TcmFileMonitorStats {
             pid_table_size,
             pid_entry_count,
             file_entry_count,
@@ -357,7 +357,7 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmFileEvent {
 pub enum TcmEvent {
     File(TcmFileEvent),
     Proc(TcmProcEvent),
-    FileStats(TcmFileStats),
+    FileStats(TcmFileMonitorStats),
 }
 
 impl TryFrom<GenlMessage<TcmPayload>> for TcmEvent {
@@ -368,7 +368,7 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmEvent {
             Ok(TcmEventCmd::ProcEvent) => TcmProcEvent::try_from(value).map(TcmEvent::Proc),
             Ok(TcmEventCmd::FileEvent) => TcmFileEvent::try_from(value).map(TcmEvent::File),
             Ok(TcmEventCmd::FileStatsEvent) => {
-                TcmFileStats::try_from(value).map(TcmEvent::FileStats)
+                TcmFileMonitorStats::try_from(value).map(TcmEvent::FileStats)
             }
             Err(err) => Err(err),
         }
@@ -378,7 +378,7 @@ impl TryFrom<GenlMessage<TcmPayload>> for TcmEvent {
 pub trait TcmEventHandler: Send + Sync {
     fn on_file(&self, _event: TcmFileEvent) {}
     fn on_proc(&self, _event: TcmProcEvent) {}
-    fn on_file_stats(&self, _event: TcmFileStats) {}
+    fn on_file_stats(&self, _event: TcmFileMonitorStats) {}
 }
 
 pub fn handle_raw_message(message: NetlinkMessage<RawGenlMessage>, handler: &dyn TcmEventHandler) {

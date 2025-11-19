@@ -13,8 +13,9 @@
 #include "tcm/api.h"
 #include "tcm/genl.h"
 #include "tcm/kprobes/file.h"
+#include "tcm/login.h"
 #include "tcm/whitelist/file.h"
-#include "tcm/whitelist/pid.h"
+#include "tcm/whitelist/proc.h"
 
 /*
  * 通用 Netlink 核心：
@@ -23,11 +24,6 @@
  *  - 提供白名单与统计信息的控制接口
  */
 
-typedef struct {
-  struct list_head node;
-  u32 portid;
-} genl_core_client_t;
-
 /* genetlink 核心上下文，封装 family、ops、监听器等状态。 */
 struct genl_core {
   struct nla_policy policy[TCM_GENL_ATTR_MAX];
@@ -35,8 +31,24 @@ struct genl_core {
   struct genl_ops ops[TCM_GENL_CMD_OPS_COUNT];
   struct genl_family family;
   file_listener_t *file_listener;
-  struct list_head clients;
-  spinlock_t clients_lock;
+  login_manager_t *login_manager;
+};
+
+static const struct nla_policy
+    file_whitelist_path_policy[TCM_GENL_PATH_LIST_ATTR_MAX] = {
+        [TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY] =
+            {
+                .type = NLA_NUL_STRING,
+                .len = PATH_MAX,
+            },
+};
+
+static const struct nla_policy
+    proc_whitelist_path_policy[TCM_GENL_PROC_LIST_ATTR_MAX] = {
+        [TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY] =
+            {
+                .type = NLA_S32,
+            },
 };
 
 static int genl_core_get_from_info(struct genl_info *info,
@@ -44,13 +56,11 @@ static int genl_core_get_from_info(struct genl_info *info,
   genl_core_t *core;
 
   if (!info || !info->family) {
-    pr_warn("%s: invalid genl_info\n", __func__);
     return -EINVAL;
   }
 
   core = container_of(info->family, genl_core_t, family);
   if (!core) {
-    pr_warn("%s: genl_core not initialized\n", __func__);
     return -EINVAL;
   }
 
@@ -61,83 +71,88 @@ static int genl_core_get_from_info(struct genl_info *info,
   return 0;
 }
 
-static bool genl_core_clients_contains_locked(genl_core_t *core, u32 portid) {
-  genl_core_client_t *client;
-
-  list_for_each_entry(client, &core->clients, node) {
-    if (client->portid == portid) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-static bool genl_core_clients_contains(genl_core_t *core, u32 portid) {
-  unsigned long flags;
-  bool found;
-
-  if (!core) {
-    return false;
-  }
-
-  spin_lock_irqsave(&core->clients_lock, flags);
-  found = genl_core_clients_contains_locked(core, portid);
-  spin_unlock_irqrestore(&core->clients_lock, flags);
-
-  return found;
-}
-
-static int genl_core_clients_add(genl_core_t *core, u32 portid) {
-  genl_core_client_t *client;
-  unsigned long flags;
-
-  if (!core) {
+static int genl_core_parse_login_op(struct genl_info *info, login_op_t *op) {
+  if (!info || !op) {
     return -EINVAL;
   }
 
-  spin_lock_irqsave(&core->clients_lock, flags);
-  if (genl_core_clients_contains_locked(core, portid)) {
-    spin_unlock_irqrestore(&core->clients_lock, flags);
-    return -EEXIST;
+  if (!info->attrs[TCM_GENL_ATTR_KEY]) {
+    return -EINVAL;
   }
-  spin_unlock_irqrestore(&core->clients_lock, flags);
 
-  client = kmalloc(sizeof(*client), GFP_KERNEL);
-  if (!client) {
+  strncpy(op->key, nla_data(info->attrs[TCM_GENL_ATTR_KEY]),
+          TCM_GENL_ATTR_KEY_MAX_LEN);
+  return 0;
+}
+
+static int genl_core_proc_list_to_array(struct nlattr *proc_list, s32 **procs) {
+  struct nlattr *entry;
+  int rem;
+  int count = 0;
+  int i = 0;
+
+  if (!proc_list) {
+    pr_warn("%s: proc_list is NULL\n", __func__);
+    return -EINVAL;
+  }
+
+  nla_for_each_nested(entry, proc_list, rem) { count += 1; }
+
+  *procs = kzalloc((count + 1) * sizeof(s32), GFP_KERNEL);
+  if (!*procs) {
+    pr_warn("%s: failed to kzalloc procs count=%d\n", __func__, count);
     return -ENOMEM;
   }
 
-  client->portid = portid;
-  INIT_LIST_HEAD(&client->node);
+  nla_for_each_nested(entry, proc_list, rem) {
+    if (nla_type(entry) == TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY) {
+      (*procs)[i] = -nla_get_s32(entry);
+    } else if (nla_type(entry) == TCM_GENL_PROC_LIST_ATTR_PROC_TREE_ENTRY) {
+      (*procs)[i] = nla_get_s32(entry);
+    } else {
+      pr_warn("%s: unexpected nested attr type %d for proc_list_to_array\n",
+              __func__, nla_type(entry));
+      return -EINVAL;
+    }
 
-  spin_lock_irqsave(&core->clients_lock, flags);
-  if (genl_core_clients_contains_locked(core, portid)) {
-    spin_unlock_irqrestore(&core->clients_lock, flags);
-    kfree(client);
-    return -EEXIST;
+    i += 1;
   }
-
-  list_add_tail(&client->node, &core->clients);
-  spin_unlock_irqrestore(&core->clients_lock, flags);
 
   return 0;
 }
 
-static void genl_core_clients_clear(genl_core_t *core) {
-  genl_core_client_t *client, *tmp;
-  unsigned long flags;
+static int genl_core_file_list_to_array(struct nlattr *path_list,
+                                        const char ***paths) {
+  struct nlattr *entry;
+  int rem;
+  int count = 0;
+  int i = 0;
 
-  if (!core) {
-    return;
+  if (!path_list) {
+    pr_warn("%s: path_list is NULL\n", __func__);
+    return -EINVAL;
   }
 
-  spin_lock_irqsave(&core->clients_lock, flags);
-  list_for_each_entry_safe(client, tmp, &core->clients, node) {
-    list_del(&client->node);
-    kfree(client);
+  nla_for_each_nested(entry, path_list, rem) { count += 1; }
+
+  *paths = kzalloc((count + 1) * sizeof(const char *), GFP_KERNEL);
+  if (!*paths) {
+    pr_warn("%s: failed to kzalloc paths count=%d\n", __func__, count);
+    return -ENOMEM;
   }
-  spin_unlock_irqrestore(&core->clients_lock, flags);
+
+  nla_for_each_nested(entry, path_list, rem) {
+    if (nla_type(entry) != TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY) {
+      pr_warn("%s: unexpected nested attr type %d for file_list_to_array\n",
+              __func__, nla_type(entry));
+      return -EINVAL;
+    }
+
+    (*paths)[i] = (const char *)nla_data(entry);
+    i += 1;
+  }
+
+  return 0;
 }
 
 static int genl_core_require_client_login(struct genl_info *info,
@@ -147,10 +162,11 @@ static int genl_core_require_client_login(struct genl_info *info,
 
   ret = genl_core_get_from_info(info, &core);
   if (ret) {
+    pr_warn("%s: failed to get from info: %d\n", __func__, ret);
     return ret;
   }
 
-  if (!genl_core_clients_contains(core, info->snd_portid)) {
+  if (!login_manager_contains(core->login_manager, info->snd_portid)) {
     pr_warn("%s: client pid=%d not logged in\n", __func__, info->snd_portid);
     return -EACCES;
   }
@@ -166,42 +182,123 @@ static int genl_core_require_client_login(struct genl_info *info,
 static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
   genl_core_t *core;
   int ret;
-  const char *key = NULL;
+  login_op_t op;
 
   ret = genl_core_get_from_info(info, &core);
   if (ret) {
+    pr_warn("%s: failed to get from info: %d\n", __func__, ret);
     return ret;
   }
 
-  if (info->attrs[TCM_GENL_ATTR_KEY]) {
-    key = (const char *)nla_data(info->attrs[TCM_GENL_ATTR_KEY]);
-  }
-  if (!key) {
-    pr_warn("%s: invalid key\n", __func__);
-    return -EINVAL;
+  ret = genl_core_parse_login_op(info, &op);
+  if (ret) {
+    pr_warn("%s: failed to parse login op: %d\n", __func__, ret);
+    return ret;
   }
 
-  if (strcmp(key, "1234567890") != 0) {
-    pr_warn("%s: invalid key\n", __func__);
-    return -EINVAL;
-  }
-
-  ret = genl_core_clients_add(core, info->snd_portid);
+  ret = login_manager_login(core->login_manager, info->snd_portid, &op);
   if (ret != 0 && ret != -EEXIST) {
     pr_warn("%s: failed to add client pid=%d: %d\n", __func__, info->snd_portid,
             ret);
     return ret;
   }
 
-  ret = pid_whitelist_add(info->snd_portid);
+  ret = proc_whitelist_add(info->snd_portid, true);
   if (ret != 0 && ret != -EEXIST) {
     pr_warn("%s: pid_whitelist_add failed for pid=%d: %d\n", __func__,
             info->snd_portid, ret);
     return ret;
   }
 
-  pr_info("%s: registered client pid=%d\n", __func__, info->snd_portid);
+  pr_info("%s: client pid=%d logged in\n", __func__, info->snd_portid);
   return 0;
+}
+
+static void free_file_list(const char **paths) {
+  if (!paths) {
+    return;
+  }
+  kfree(paths);
+}
+
+static void free_proc_list(s32 *procs) {
+  if (!procs) {
+    return;
+  }
+  kfree(procs);
+}
+
+static int genl_core_parse_file_whitelist_add_op(struct genl_info *info,
+                                                 file_whitelist_add_op_t *op) {
+  int ret;
+  struct nlattr *path_list;
+
+  if (!info || !op) {
+    return -EINVAL;
+  }
+
+  op->paths = NULL;
+
+  if (!info->attrs[TCM_GENL_ATTR_PATH_LIST]) {
+    return -EINVAL;
+  }
+
+  path_list = info->attrs[TCM_GENL_ATTR_PATH_LIST];
+  ret = nla_validate_nested(path_list, TCM_GENL_PATH_LIST_ATTR_MAX - 1,
+                            file_whitelist_path_policy, NULL);
+  if (ret) {
+    pr_warn("%s: invalid file_whitelist_add path list: %d\n", __func__, ret);
+    return ret;
+  }
+
+  ret = genl_core_file_list_to_array(path_list, &op->paths);
+  if (ret) {
+    pr_warn("%s: failed to convert path list to array: %d\n", __func__, ret);
+    return ret;
+  }
+
+  return 0;
+}
+
+static int
+genl_core_parse_file_whitelist_remove_op(struct genl_info *info,
+                                         file_whitelist_remove_op_t *op) {
+  return genl_core_parse_file_whitelist_add_op(info, op);
+}
+
+static int genl_core_parse_proc_whitelist_add_op(struct genl_info *info,
+                                                 proc_whitelist_add_op_t *op) {
+  int ret;
+  struct nlattr *proc_list;
+
+  if (!info || !op) {
+    return -EINVAL;
+  }
+
+  if (!info->attrs[TCM_GENL_ATTR_PROC_LIST]) {
+    return -EINVAL;
+  }
+
+  proc_list = info->attrs[TCM_GENL_ATTR_PROC_LIST];
+  ret = nla_validate_nested(proc_list, TCM_GENL_PROC_LIST_ATTR_MAX - 1,
+                            proc_whitelist_path_policy, NULL);
+  if (ret) {
+    pr_warn("%s: invalid proc_whitelist_add proc list: %d\n", __func__, ret);
+    return ret;
+  }
+
+  ret = genl_core_proc_list_to_array(proc_list, &op->procs);
+  if (ret) {
+    pr_warn("%s: failed to convert proc list to array: %d\n", __func__, ret);
+    return ret;
+  }
+  return 0;
+}
+
+static int
+genl_core_parse_proc_whitelist_remove_op(struct genl_info *info,
+                                         proc_whitelist_remove_op_t *op) {
+  return genl_core_parse_proc_whitelist_add_op(info, op);
 }
 
 /* 应答文件监听器统计信息的查询命令。 */
@@ -298,32 +395,12 @@ err_cancel:
   return ret;
 }
 
-/* 从 Netlink 报文解析白名单路径属性。 */
-static int genl_core_parse_file_whitelist(struct genl_info *info,
-                                          const char **path) {
-  if (!info || !path) {
-    return -EINVAL;
-  }
-
-  if (!info->attrs[TCM_GENL_ATTR_PATH1]) {
-    pr_warn("%s: missing TCM_GENL_ATTR_PATH1 attribute\n", __func__);
-    return -EINVAL;
-  }
-
-  *path = nla_data(info->attrs[TCM_GENL_ATTR_PATH1]);
-  if (!*path) {
-    pr_warn("%s: invalid whitelist path attribute\n", __func__);
-    return -EINVAL;
-  }
-
-  return 0;
-}
-
 /* 处理添加白名单路径的 Netlink 命令。 */
 static int genl_core_handle_file_whitelist_add(struct sk_buff *skb,
                                                struct genl_info *info) {
-  const char *path;
+  file_whitelist_add_op_t op = {.paths = NULL};
   int ret;
+  const char *path;
 
   ret = genl_core_require_client_login(info, NULL);
   if (ret) {
@@ -331,25 +408,32 @@ static int genl_core_handle_file_whitelist_add(struct sk_buff *skb,
   }
 
   /* 从报文中解析出目标白名单路径。 */
-  ret = genl_core_parse_file_whitelist(info, &path);
+  ret = genl_core_parse_file_whitelist_add_op(info, &op);
   if (ret) {
     pr_warn("%s: failed to parse add whitelist request: %d\n", __func__, ret);
     return ret;
   }
 
-  ret = file_whitelist_add(path);
-  if (ret) {
-    pr_warn("%s: file_whitelist_add failed for \"%s\": %d\n", __func__, path,
-            ret);
+  for (const char **cursor = op.paths; cursor && *cursor; cursor++) {
+    path = *cursor;
+    ret = file_whitelist_add(path);
+    if (ret && ret != -EEXIST) {
+      pr_warn("%s: file_whitelist_add failed for \"%s\": %d\n", __func__, path,
+              ret);
+      break;
+    }
   }
+
+  free_file_list(op.paths);
   return ret;
 }
 
 /* 处理移除白名单路径的 Netlink 命令。 */
 static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
                                                   struct genl_info *info) {
-  const char *path;
+  file_whitelist_remove_op_t op = {.paths = NULL};
   int ret;
+  const char *path;
 
   ret = genl_core_require_client_login(info, NULL);
   if (ret) {
@@ -357,62 +441,87 @@ static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
   }
 
   /* 与添加路径共用解析逻辑，确保输入一致性。 */
-  ret = genl_core_parse_file_whitelist(info, &path);
+  ret = genl_core_parse_file_whitelist_remove_op(info, &op);
   if (ret) {
     pr_warn("%s: failed to parse remove whitelist request: %d\n", __func__,
             ret);
     return ret;
   }
 
-  ret = file_whitelist_remove(path);
-  if (ret) {
-    pr_warn("%s: file_whitelist_remove failed for \"%s\": %d\n", __func__, path,
-            ret);
+  for (const char **cursor = op.paths; cursor && *cursor; cursor++) {
+    path = *cursor;
+    ret = file_whitelist_remove(path);
+    if (ret && ret != -ENOENT) {
+      pr_warn("%s: file_whitelist_remove failed for \"%s\": %d\n", __func__,
+              path, ret);
+      break;
+    }
   }
+
+  free_file_list(op.paths);
   return ret;
 }
 
 static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
                                                struct genl_info *info) {
   int ret;
+  proc_whitelist_add_op_t op = {.procs = NULL};
+  s32 *proc;
 
   ret = genl_core_require_client_login(info, NULL);
   if (ret) {
     return ret;
   }
 
-  // TODO
-  // const char *path;
-  // int ret;
-  // ret = proc_whitelist_add(path);
-  // if (ret) {
-  //   pr_warn("%s: proc_whitelist_add failed for \"%s\": %d\n", __func__, path,
-  //           ret);
-  // }
-  // return ret;
-  return 0;
+  ret = genl_core_parse_proc_whitelist_add_op(info, &op);
+  if (ret) {
+    pr_warn("%s: failed to parse add proc whitelist request: %d\n", __func__,
+            ret);
+    return ret;
+  }
+
+  for (proc = op.procs; *proc; proc++) {
+    ret = proc_whitelist_add(abs(*proc), *proc > 0);
+    if (ret && ret != -EEXIST) {
+      pr_warn("%s: pid_whitelist_add failed for proc=%d: %d\n", __func__, *proc,
+              ret);
+      break;
+    }
+  }
+
+  free_proc_list(op.procs);
+  return ret;
 }
 
 static int genl_core_handle_proc_whitelist_remove(struct sk_buff *skb,
                                                   struct genl_info *info) {
   int ret;
+  proc_whitelist_remove_op_t op = {.procs = NULL};
+  s32 *proc;
 
   ret = genl_core_require_client_login(info, NULL);
   if (ret) {
     return ret;
   }
 
-  // TODO
-  // const char *path;
-  // int ret;
-  // ret = proc_whitelist_remove(path);
-  // if (ret) {
-  //   pr_warn("%s: proc_whitelist_remove failed for \"%s\": %d\n", __func__,
-  //   path,
-  //           ret);
-  // }
-  // return ret;
-  return 0;
+  ret = genl_core_parse_proc_whitelist_remove_op(info, &op);
+  if (ret) {
+    pr_warn("%s: failed to parse remove proc whitelist request: %d\n", __func__,
+            ret);
+    return ret;
+  }
+
+  for (proc = op.procs; *proc; proc++) {
+    ret = proc_whitelist_remove(abs(*proc), *proc > 0);
+    if (ret && ret != -ENOENT) {
+      pr_warn("%s: pid_whitelist_remove failed for proc=%d: %d\n", __func__,
+              *proc, ret);
+      break;
+    }
+  }
+
+  free_proc_list(op.procs);
+  return ret;
 }
 
 /* 注册 genetlink family，并初始化命令/多播配置。 */
@@ -429,14 +538,17 @@ int genl_core_init(genl_core_t **core) {
     return 0;
   }
 
-  *core = kmalloc(sizeof(genl_core_t), GFP_KERNEL);
+  *core = kzalloc(sizeof(genl_core_t), GFP_KERNEL);
   if (!*core) {
-    pr_warn("%s: failed to kmalloc genl_core\n", __func__);
+    pr_warn("%s: failed to kzalloc genl_core\n", __func__);
     return -ENOMEM;
   }
 
-  INIT_LIST_HEAD(&(*core)->clients);
-  spin_lock_init(&(*core)->clients_lock);
+  if (login_manager_init(&(*core)->login_manager) != 0) {
+    pr_warn("%s: failed to init login manager\n", __func__);
+    genl_core_exit(core);
+    return -ENOMEM;
+  }
 
   /* 在栈上准备策略、组和命令的模板配置。 */
   struct nla_policy policy[TCM_GENL_ATTR_MAX] = {
@@ -452,6 +564,8 @@ int genl_core_init(genl_core_t **core) {
       [TCM_GENL_ATTR_FD] = {.type = NLA_S32},
       [TCM_GENL_ATTR_PATH1] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
       [TCM_GENL_ATTR_PATH2] = {.type = NLA_NUL_STRING, .len = PATH_MAX},
+      [TCM_GENL_ATTR_PATH_LIST] = {.type = NLA_NESTED},
+      [TCM_GENL_ATTR_PROC_LIST] = {.type = NLA_NESTED},
       [TCM_GENL_ATTR_FILE_STATS_PID_TABLE_SIZE] = {.type = NLA_U32},
       [TCM_GENL_ATTR_FILE_STATS_PID_ENTRY_COUNT] = {.type = NLA_U32},
       [TCM_GENL_ATTR_FILE_STATS_FILE_ENTRY_COUNT] = {.type = NLA_U32},
@@ -556,7 +670,7 @@ void genl_core_exit(genl_core_t **core) {
   pr_info("%s\n", __func__);
 
   genl_unregister_family(&(*core)->family);
-  genl_core_clients_clear(*core);
+  login_manager_exit(&(*core)->login_manager);
 
   kfree(*core);
   *core = NULL;
