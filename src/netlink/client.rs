@@ -117,13 +117,10 @@ impl TcmGenlClient {
         self.request(TcmCommand::Operation(op), nlas).await
     }
 
-    pub async fn login(&mut self) -> Result<()> {
-        self.put(
-            TcmOperateCmd::Login,
-            vec![TcmAttr::Key("1234567890".to_owned())],
-        )
-        .await
-        .map(|_| ())
+    pub async fn login(&mut self, key: &str) -> Result<()> {
+        self.put(TcmOperateCmd::Login, vec![TcmAttr::Key(key.to_owned())])
+            .await
+            .map(|_| ())
     }
 
     pub async fn get_file_monitor_stats(&mut self) -> Result<TcmFileMonitorStats> {

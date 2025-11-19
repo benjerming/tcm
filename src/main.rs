@@ -2,9 +2,10 @@ mod netlink;
 mod tcm;
 mod undo;
 
+use std::path::{Component, Path};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use genetlink::new_connection;
 use log::{debug, error, info, warn};
 use netlink_proto::sys::AsyncSocket;
@@ -77,9 +78,13 @@ async fn main() -> Result<()> {
     let mut stdout = stdout();
     let mut input = String::new();
     let mut undo_redo = UndoRedoManager::new();
+    let auth_key = std::env::var("TCM_AUTH_KEY").unwrap_or_else(|_| {
+        warn!("TCM_AUTH_KEY 未设置，将使用默认测试密钥");
+        "1234567890".to_owned()
+    });
 
     info!("logging in to TCM");
-    client.login().await.context("failed to login")?;
+    client.login(&auth_key).await.context("failed to login")?;
     info!("  success");
 
     loop {
@@ -136,26 +141,16 @@ async fn main() -> Result<()> {
                 listener.disable();
             }
             "3" => {
-                stdout
-                    .write_all("请输入信任文件[夹](以/结尾): ".as_bytes())
-                    .await?;
-                stdout.flush().await?;
-
-                let path_buf = {
-                    let mut buf = String::new();
-                    stdin.read_line(&mut buf).await?;
-                    buf
-                };
-                if path_buf.is_empty() {
-                    info!("标准输入已关闭，准备退出");
-                    break;
-                }
-                let path_trimmed = path_buf.trim();
-                if path_trimmed.is_empty() {
-                    stdout.write_all("路径不能为空\n".as_bytes()).await?;
-                    continue;
-                }
-                let path = path_trimmed.to_owned();
+                let path =
+                    match prompt_path(&mut stdout, &mut stdin, "请输入信任文件[夹](以/结尾): ")
+                        .await?
+                    {
+                        Some(path) => path,
+                        None => {
+                            info!("标准输入已关闭，准备退出");
+                            break;
+                        }
+                    };
 
                 match client.put_trust_path(&path).await {
                     Ok(()) => {
@@ -171,28 +166,23 @@ async fn main() -> Result<()> {
                 }
             }
             "4" => {
-                stdout
-                    .write_all("请输入要移除的信任文件[夹](以/结尾): ".as_bytes())
-                    .await?;
-
-                let path_buf = {
-                    let mut buf = String::new();
-                    stdin.read_line(&mut buf).await?;
-                    buf
+                let path = match prompt_path(
+                    &mut stdout,
+                    &mut stdin,
+                    "请输入要移除的信任文件[夹](以/结尾): ",
+                )
+                .await?
+                {
+                    Some(path) => path,
+                    None => {
+                        info!("标准输入已关闭，准备退出");
+                        break;
+                    }
                 };
-                if path_buf.is_empty() {
-                    info!("标准输入已关闭，准备退出");
-                    break;
-                }
-                let path_trimmed = path_buf.trim();
-                if path_trimmed.is_empty() {
-                    stdout.write_all("路径不能为空\n".as_bytes()).await?;
-                    continue;
-                }
-                let path = path_trimmed.to_owned();
 
                 match client.distrust_path(&path).await {
                     Ok(()) => {
+                        undo_redo.record(WhitelistAction::FileRemove(path.clone()));
                         stdout.write_all("信任文件[夹]已更新\n".as_bytes()).await?;
                     }
                     Err(err) => {
@@ -204,48 +194,18 @@ async fn main() -> Result<()> {
                 }
             }
             "5" => {
-                stdout
-                    .write_all(
-                        "请输入要添加信任的进程 PID(负数表示单个进程，正数表示进程树): ".as_bytes(),
-                    )
-                    .await?;
-                stdout.flush().await?;
-
-                let pid_buf = {
-                    let mut buf = String::new();
-                    stdin.read_line(&mut buf).await?;
-                    buf
-                };
-                if pid_buf.is_empty() {
-                    info!("标准输入已关闭，准备退出");
-                    break;
-                }
-                let pid_trimmed = pid_buf.trim();
-                if pid_trimmed.is_empty() {
-                    stdout.write_all("PID 不能为空\n".as_bytes()).await?;
-                    continue;
-                }
-                let pid: i32 = match pid_trimmed.parse() {
-                    Ok(v) if v > 0 => v,
-                    _ => {
-                        stdout.write_all("无效的PID\n".as_bytes()).await?;
-                        continue;
+                let (pid, include_children) = match prompt_pid(
+                    &mut stdout,
+                    &mut stdin,
+                    "请输入要添加信任的进程 PID(负数表示单个进程，正数表示进程树): ",
+                )
+                .await?
+                {
+                    Some(result) => result,
+                    None => {
+                        info!("标准输入已关闭，准备退出");
+                        break;
                     }
-                };
-
-                stdout
-                    .write_all("是否对子进程也生效？(Y/n): ".as_bytes())
-                    .await?;
-                let mut scope_buf = String::new();
-                let scope_bytes = stdin.read_line(&mut scope_buf).await?;
-                if scope_bytes == 0 {
-                    info!("标准输入已关闭，准备退出");
-                    break;
-                }
-                let scope_choice = scope_buf.trim().to_ascii_lowercase();
-                let include_children = match scope_choice.as_str() {
-                    "n" | "no" => false,
-                    _ => true,
                 };
 
                 match client
@@ -268,52 +228,27 @@ async fn main() -> Result<()> {
                 }
             }
             "6" => {
-                stdout
-                    .write_all(
-                        "请输入要移除的进程 PID(负数表示单个进程，正数表示进程树): ".as_bytes(),
-                    )
-                    .await?;
-
-                let pid_buf = {
-                    let mut buf = String::new();
-                    stdin.read_line(&mut buf).await?;
-                    buf
-                };
-                if pid_buf.is_empty() {
-                    info!("标准输入已关闭，准备退出");
-                    break;
-                }
-                let pid_trimmed = pid_buf.trim();
-                if pid_trimmed.is_empty() {
-                    stdout.write_all("PID 不能为空\n".as_bytes()).await?;
-                    continue;
-                }
-                let pid: i32 = match pid_trimmed.parse() {
-                    Ok(v) if v > 0 => v,
-                    _ => {
-                        stdout.write_all("PID 无效\n".as_bytes()).await?;
-                        continue;
+                let (pid, include_children) = match prompt_pid(
+                    &mut stdout,
+                    &mut stdin,
+                    "请输入要移除的进程 PID(负数表示单个进程，正数表示进程树): ",
+                )
+                .await?
+                {
+                    Some(result) => result,
+                    None => {
+                        info!("标准输入已关闭，准备退出");
+                        break;
                     }
-                };
-
-                stdout
-                    .write_all("是否对子进程也生效？(Y/n): ".as_bytes())
-                    .await?;
-                let mut scope_buf = String::new();
-                let scope_bytes = stdin.read_line(&mut scope_buf).await?;
-                if scope_bytes == 0 {
-                    info!("标准输入已关闭，准备退出");
-                    break;
-                }
-                let scope_choice = scope_buf.trim().to_ascii_lowercase();
-                let include_children = match scope_choice.as_str() {
-                    "n" | "no" => false,
-                    _ => true,
                 };
 
                 match client.distrust_proc(pid, include_children).await {
                     Ok(()) => {
                         stdout.write_all("信任进程已更新\n".as_bytes()).await?;
+                        undo_redo.record(WhitelistAction::ProcRemove {
+                            pid,
+                            include_children,
+                        });
                     }
                     Err(err) => {
                         warn!("移除信任进程失败: {err:?}");
@@ -419,4 +354,120 @@ impl TcmEventHandler for LoggingEventHandler {
             );
         }
     }
+}
+
+async fn prompt_line(
+    stdout: &mut tokio::io::Stdout,
+    stdin: &mut BufReader<tokio::io::Stdin>,
+    prompt: &str,
+) -> Result<Option<String>> {
+    stdout.write_all(prompt.as_bytes()).await?;
+    stdout.flush().await?;
+
+    let mut buf = String::new();
+    let bytes = stdin.read_line(&mut buf).await?;
+    if bytes == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(buf.trim().to_owned()))
+}
+
+async fn prompt_path(
+    stdout: &mut tokio::io::Stdout,
+    stdin: &mut BufReader<tokio::io::Stdin>,
+    prompt: &str,
+) -> Result<Option<String>> {
+    loop {
+        match prompt_line(stdout, stdin, prompt).await? {
+            None => return Ok(None),
+            Some(input) => match normalize_path(&input) {
+                Ok(path) => return Ok(Some(path)),
+                Err(err) => {
+                    stdout
+                        .write_all(format!("错误: {err}\n").as_bytes())
+                        .await?;
+                }
+            },
+        }
+    }
+}
+
+async fn prompt_pid(
+    stdout: &mut tokio::io::Stdout,
+    stdin: &mut BufReader<tokio::io::Stdin>,
+    prompt: &str,
+) -> Result<Option<(i32, bool)>> {
+    loop {
+        match prompt_line(stdout, stdin, prompt).await? {
+            None => return Ok(None),
+            Some(input) if input.is_empty() => {
+                stdout.write_all("PID 不能为空\n".as_bytes()).await?;
+            }
+            Some(input) => match input.parse::<i32>() {
+                Ok(pid) if pid != 0 => {
+                    let include_children = pid > 0;
+                    return Ok(Some((pid.abs(), include_children)));
+                }
+                _ => {
+                    stdout.write_all("PID 无效\n".as_bytes()).await?;
+                }
+            },
+        }
+    }
+}
+
+fn normalize_path(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("路径不能为空"));
+    }
+
+    let has_trailing_slash = trimmed.ends_with('/');
+    let path = Path::new(trimmed);
+    let mut normalized_segments: Vec<String> = Vec::new();
+    let mut is_absolute = path.is_absolute();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) => {
+                return Err(anyhow!("不支持包含磁盘前缀的路径"));
+            }
+            Component::RootDir => {
+                is_absolute = true;
+                normalized_segments.clear();
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized_segments.pop().is_none() {
+                    if !is_absolute {
+                        return Err(anyhow!("路径越界: 包含无法解析的 .."));
+                    }
+                }
+            }
+            Component::Normal(segment) => {
+                let segment_str = segment.to_string_lossy();
+                if segment_str.is_empty() {
+                    continue;
+                }
+                normalized_segments.push(segment_str.into_owned());
+            }
+        }
+    }
+
+    let mut normalized = String::new();
+    if is_absolute {
+        normalized.push('/');
+    }
+    normalized.push_str(&normalized_segments.join("/"));
+
+    if normalized.is_empty() {
+        normalized = if is_absolute { "/".into() } else { ".".into() };
+    }
+
+    if has_trailing_slash && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+
+    Ok(normalized)
 }

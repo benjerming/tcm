@@ -5,13 +5,16 @@ use crate::netlink::TcmGenlClient;
 #[derive(Debug, Clone)]
 pub enum WhitelistAction {
     FileAdd(String),
+    FileRemove(String),
     ProcAdd { pid: i32, include_children: bool },
+    ProcRemove { pid: i32, include_children: bool },
 }
 
 impl WhitelistAction {
     pub fn describe(&self) -> String {
         match self {
             WhitelistAction::FileAdd(path) => format!("文件白名单 +{path}"),
+            WhitelistAction::FileRemove(path) => format!("文件白名单 -{path}"),
             WhitelistAction::ProcAdd {
                 pid,
                 include_children,
@@ -23,26 +26,55 @@ impl WhitelistAction {
                 };
                 format!("进程白名单 +PID({pid}) [{scope}]")
             }
+            WhitelistAction::ProcRemove {
+                pid,
+                include_children,
+            } => {
+                let scope = if *include_children {
+                    "含子进程"
+                } else {
+                    "仅自身"
+                };
+                format!("进程白名单 -PID({pid}) [{scope}]")
+            }
         }
     }
 
     async fn apply(&self, client: &mut TcmGenlClient) -> Result<()> {
         match self {
             WhitelistAction::FileAdd(path) => client.put_trust_path(path).await,
+            WhitelistAction::FileRemove(path) => client.distrust_path(path).await,
             WhitelistAction::ProcAdd {
                 pid,
                 include_children,
-            } => client.put_trust_proc_list(vec![*pid], *include_children).await,
+            } => {
+                client
+                    .put_trust_proc_list(vec![*pid], *include_children)
+                    .await
+            }
+            WhitelistAction::ProcRemove {
+                pid,
+                include_children,
+            } => client.distrust_proc(*pid, *include_children).await,
         }
     }
 
     async fn revert(&self, client: &mut TcmGenlClient) -> Result<()> {
         match self {
             WhitelistAction::FileAdd(path) => client.distrust_path(path).await,
+            WhitelistAction::FileRemove(path) => client.put_trust_path(path).await,
             WhitelistAction::ProcAdd {
                 pid,
                 include_children,
             } => client.distrust_proc(*pid, *include_children).await,
+            WhitelistAction::ProcRemove {
+                pid,
+                include_children,
+            } => {
+                client
+                    .put_trust_proc_list(vec![*pid], *include_children)
+                    .await
+            }
         }
     }
 }
