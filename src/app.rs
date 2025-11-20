@@ -224,28 +224,56 @@ impl App {
                     }
                 }
             }
-            "7" => match self.undo_redo.undo(&mut self.client).await {
-                Ok(action) => {
-                    let msg = format!("已撤销: {}\n", action.describe());
-                    self.stdout.write_all(msg.as_bytes()).await?;
+            "7" => {
+                match self.undo_redo.pop_undo() {
+                    Ok(action) => {
+                        let description = action.describe();
+                        match self.revert_trust_action(&action).await {
+                            Ok(()) => {
+                                self.undo_redo.push_redo(action);
+                                let msg = format!("已撤销: {description}\n");
+                                self.stdout.write_all(msg.as_bytes()).await?;
+                            }
+                            Err(err) => {
+                                self.undo_redo.push_undo(action);
+                                self.stdout
+                                    .write_all(format!("错误: {err:?}\n").as_bytes())
+                                    .await?;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.stdout
+                            .write_all(format!("错误: {err:?}\n").as_bytes())
+                            .await?;
+                    }
                 }
-                Err(err) => {
-                    self.stdout
-                        .write_all(format!("错误: {err:?}\n").as_bytes())
-                        .await?;
+            }
+            "8" => {
+                match self.undo_redo.pop_redo() {
+                    Ok(action) => {
+                        let description = action.describe();
+                        match self.apply_trust_action(&action).await {
+                            Ok(()) => {
+                                self.undo_redo.push_undo(action);
+                                let msg = format!("已重做: {description}\n");
+                                self.stdout.write_all(msg.as_bytes()).await?;
+                            }
+                            Err(err) => {
+                                self.undo_redo.push_redo(action);
+                                self.stdout
+                                    .write_all(format!("错误: {err:?}\n").as_bytes())
+                                    .await?;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.stdout
+                            .write_all(format!("错误: {err:?}\n").as_bytes())
+                            .await?;
+                    }
                 }
-            },
-            "8" => match self.undo_redo.redo(&mut self.client).await {
-                Ok(action) => {
-                    let msg = format!("已重做: {}\n", action.describe());
-                    self.stdout.write_all(msg.as_bytes()).await?;
-                }
-                Err(err) => {
-                    self.stdout
-                        .write_all(format!("错误: {err:?}\n").as_bytes())
-                        .await?;
-                }
-            },
+            }
             "9" => {
                 let (undo_stack, redo_stack) = self.undo_redo.stack_descriptions();
                 let mut message = String::from("\n撤销栈 (栈顶在上):\n");
@@ -329,6 +357,28 @@ impl App {
         }
 
         Ok(Some(buf.trim().to_owned()))
+    }
+
+    async fn apply_trust_action(&mut self, action: &TrustAction) -> Result<()> {
+        match action {
+            TrustAction::TrustFileAdd(path) => self.client.put_trust_path(path).await,
+            TrustAction::TrustFileRemove(path) => self.client.distrust_path(path).await,
+            TrustAction::TrustProcAdd(pid) => {
+                self.client.put_trust_proc_list(vec![*pid]).await
+            }
+            TrustAction::TrustProcRemove(pid) => self.client.distrust_proc(*pid).await,
+        }
+    }
+
+    async fn revert_trust_action(&mut self, action: &TrustAction) -> Result<()> {
+        match action {
+            TrustAction::TrustFileAdd(path) => self.client.distrust_path(path).await,
+            TrustAction::TrustFileRemove(path) => self.client.put_trust_path(path).await,
+            TrustAction::TrustProcAdd(pid) => self.client.distrust_proc(*pid).await,
+            TrustAction::TrustProcRemove(pid) => {
+                self.client.put_trust_proc_list(vec![*pid]).await
+            }
+        }
     }
 }
 

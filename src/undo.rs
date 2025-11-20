@@ -1,4 +1,3 @@
-use crate::netlink::TcmGenlClient;
 use anyhow::{Result, anyhow};
 
 #[derive(Debug, Clone)]
@@ -16,24 +15,6 @@ impl TrustAction {
             TrustAction::TrustFileRemove(path) => format!("移除信任文件: {path}"),
             TrustAction::TrustProcAdd(pid) => format!("添加信任进程: {pid}"),
             TrustAction::TrustProcRemove(pid) => format!("移除信任进程: {pid}"),
-        }
-    }
-
-    async fn apply(&self, client: &mut TcmGenlClient) -> Result<()> {
-        match self {
-            TrustAction::TrustFileAdd(path) => client.put_trust_path(path).await,
-            TrustAction::TrustFileRemove(path) => client.distrust_path(path).await,
-            TrustAction::TrustProcAdd(pid) => client.put_trust_proc_list(vec![*pid]).await,
-            TrustAction::TrustProcRemove(pid) => client.distrust_proc(*pid).await,
-        }
-    }
-
-    async fn revert(&self, client: &mut TcmGenlClient) -> Result<()> {
-        match self {
-            TrustAction::TrustFileAdd(path) => client.distrust_path(path).await,
-            TrustAction::TrustFileRemove(path) => client.put_trust_path(path).await,
-            TrustAction::TrustProcAdd(pid) => client.distrust_proc(*pid).await,
-            TrustAction::TrustProcRemove(pid) => client.put_trust_proc_list(vec![*pid]).await,
         }
     }
 }
@@ -70,23 +51,23 @@ impl UndoRedoManager {
         self.redo_stack.clear();
     }
 
-    pub async fn undo(&mut self, client: &mut TcmGenlClient) -> Result<TrustAction> {
-        let Some(action) = self.undo_stack.pop() else {
-            return Err(anyhow!("没有可撤销的操作"));
-        };
-        action.revert(client).await?;
-        let description = action.clone();
-        self.redo_stack.push(action);
-        Ok(description)
+    pub fn pop_undo(&mut self) -> Result<TrustAction> {
+        self.undo_stack
+            .pop()
+            .ok_or_else(|| anyhow!("没有可撤销的操作"))
     }
 
-    pub async fn redo(&mut self, client: &mut TcmGenlClient) -> Result<TrustAction> {
-        let Some(action) = self.redo_stack.pop() else {
-            return Err(anyhow!("没有可重做的操作"));
-        };
-        action.apply(client).await?;
-        let description = action.clone();
+    pub fn pop_redo(&mut self) -> Result<TrustAction> {
+        self.redo_stack
+            .pop()
+            .ok_or_else(|| anyhow!("没有可重做的操作"))
+    }
+
+    pub fn push_undo(&mut self, action: TrustAction) {
         self.undo_stack.push(action);
-        Ok(description)
+    }
+
+    pub fn push_redo(&mut self, action: TrustAction) {
+        self.redo_stack.push(action);
     }
 }
