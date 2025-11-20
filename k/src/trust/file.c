@@ -7,28 +7,29 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 
-#include "tcm/whitelist/file.h"
+#include "tcm/trust/file.h"
 
 /*
  * 文件白名单实现
  *  - 使用多层红黑树模拟文件系统层级；目录节点拥有子树，文件节点为叶子
- *  - 目录节点可标记为白名单条目(is_whitelist_entry)，从而标记该目录及子树为白名单
+ *  -
+ * 目录节点可标记为白名单条目(is_trust_entry)，从而标记该目录及子树为白名单
  *  - 使用读写锁保护并发访问，并限制最大允许条目数量
  */
 
-#define FILE_WHITELIST_MAX 256
+#define TRUST_FILE_MAX 256
 
-enum file_whitelist_node_type {
-  FILE_WHITELIST_NODE_DIR = 0,
-  FILE_WHITELIST_NODE_FILE = 1,
+enum trust_file_node_type {
+  TRUST_FILE_NODE_DIR = 0,
+  TRUST_FILE_NODE_FILE = 1,
 };
 
-struct file_whitelist_node {
+struct trust_file_node {
   struct rb_node rb;
   struct rb_root children;
-  struct file_whitelist_node *parent;
-  enum file_whitelist_node_type type;
-  bool is_whitelist_entry;
+  struct trust_file_node *parent;
+  enum trust_file_node_type type;
+  bool is_trust_entry;
   size_t name_len;
   char name[];
 };
@@ -38,13 +39,13 @@ struct path_segment {
   size_t len;
 };
 
-static struct file_whitelist_node *file_whitelist_root;
-static DEFINE_RWLOCK(file_whitelist_lock);
-static size_t file_whitelist_count;
+static struct trust_file_node *trust_file_root;
+static DEFINE_RWLOCK(trust_file_lock);
+static size_t trust_file_count;
 
 /* 在 sibling 红黑树中比较节点名称，按字典序定位。 */
-static int file_whitelist_name_cmp(const char *name, size_t name_len,
-                                   const struct file_whitelist_node *node) {
+static int trust_file_name_cmp(const char *name, size_t name_len,
+                               const struct trust_file_node *node) {
   size_t cmp_len = min(name_len, node->name_len);
   int cmp = memcmp(name, node->name, cmp_len);
 
@@ -60,11 +61,11 @@ static int file_whitelist_name_cmp(const char *name, size_t name_len,
 }
 
 /* 分配新节点：目录节点保留子树根，文件节点为叶子。 */
-static struct file_whitelist_node *
-file_whitelist_node_alloc(const char *name, size_t name_len,
-                          enum file_whitelist_node_type type, gfp_t gfp) {
-  size_t alloc_size = sizeof(struct file_whitelist_node) + name_len + 1;
-  struct file_whitelist_node *node = kzalloc(alloc_size, gfp);
+static struct trust_file_node *
+trust_file_node_alloc(const char *name, size_t name_len,
+                      enum trust_file_node_type type, gfp_t gfp) {
+  size_t alloc_size = sizeof(struct trust_file_node) + name_len + 1;
+  struct trust_file_node *node = kzalloc(alloc_size, gfp);
 
   if (!node) {
     return NULL;
@@ -73,7 +74,7 @@ file_whitelist_node_alloc(const char *name, size_t name_len,
   node->children = RB_ROOT;
   node->parent = NULL;
   node->type = type;
-  node->is_whitelist_entry = false;
+  node->is_trust_entry = false;
   node->name_len = name_len;
 
   if (name_len) {
@@ -85,9 +86,9 @@ file_whitelist_node_alloc(const char *name, size_t name_len,
 }
 
 /* 在父目录的红黑树中查找指定名称的子节点。 */
-static struct file_whitelist_node *
-file_whitelist_lookup_child(struct file_whitelist_node *parent,
-                            const char *name, size_t name_len) {
+static struct trust_file_node *
+trust_file_lookup_child(struct trust_file_node *parent, const char *name,
+                        size_t name_len) {
   struct rb_node *node;
 
   if (!parent) {
@@ -96,9 +97,8 @@ file_whitelist_lookup_child(struct file_whitelist_node *parent,
 
   node = parent->children.rb_node;
   while (node) {
-    struct file_whitelist_node *entry =
-        rb_entry(node, struct file_whitelist_node, rb);
-    int cmp = file_whitelist_name_cmp(name, name_len, entry);
+    struct trust_file_node *entry = rb_entry(node, struct trust_file_node, rb);
+    int cmp = trust_file_name_cmp(name, name_len, entry);
 
     if (cmp < 0) {
       node = node->rb_left;
@@ -113,15 +113,14 @@ file_whitelist_lookup_child(struct file_whitelist_node *parent,
 }
 
 /* 将新节点插入父目录的红黑树，必要时保持自平衡。 */
-static int file_whitelist_insert_child(struct file_whitelist_node *parent,
-                                       struct file_whitelist_node *child) {
+static int trust_file_insert_child(struct trust_file_node *parent,
+                                   struct trust_file_node *child) {
   struct rb_node **link = &parent->children.rb_node;
   struct rb_node *rb_parent = NULL;
 
   while (*link) {
-    struct file_whitelist_node *entry =
-        rb_entry(*link, struct file_whitelist_node, rb);
-    int cmp = file_whitelist_name_cmp(child->name, child->name_len, entry);
+    struct trust_file_node *entry = rb_entry(*link, struct trust_file_node, rb);
+    int cmp = trust_file_name_cmp(child->name, child->name_len, entry);
 
     rb_parent = *link;
     if (cmp < 0) {
@@ -140,9 +139,8 @@ static int file_whitelist_insert_child(struct file_whitelist_node *parent,
 }
 
 /* 递归释放节点及其子树，释放内核内存。 */
-static void
-file_whitelist_node_free_recursive(struct file_whitelist_node *node) {
-  struct file_whitelist_node *child, *tmp;
+static void trust_file_node_free_recursive(struct trust_file_node *node) {
+  struct trust_file_node *child, *tmp;
 
   if (!node) {
     return;
@@ -150,26 +148,26 @@ file_whitelist_node_free_recursive(struct file_whitelist_node *node) {
 
   /* 使用后序遍历安全地删除所有子节点 */
   rbtree_postorder_for_each_entry_safe(child, tmp, &node->children, rb) {
-    file_whitelist_node_free_recursive(child);
+    trust_file_node_free_recursive(child);
   }
 
   kfree(node);
 }
 
-static void file_whitelist_clear_locked(void) {
-  if (!file_whitelist_root) {
-    file_whitelist_count = 0;
+static void trust_file_clear_locked(void) {
+  if (!trust_file_root) {
+    trust_file_count = 0;
     return;
   }
 
-  file_whitelist_node_free_recursive(file_whitelist_root);
-  file_whitelist_root = NULL;
-  file_whitelist_count = 0;
+  trust_file_node_free_recursive(trust_file_root);
+  trust_file_root = NULL;
+  trust_file_count = 0;
 }
 
 /* 标准化路径字符串，返回是否为目录并去除冗余分隔符。 */
-static int file_whitelist_normalize(const char *input, char *out, size_t outlen,
-                                    size_t *normalized_len, bool *is_dir) {
+static int trust_file_normalize(const char *input, char *out, size_t outlen,
+                                size_t *normalized_len, bool *is_dir) {
   char *buffer;
   char *trimmed;
   size_t len;
@@ -247,9 +245,9 @@ out_free:
  *  - 例如 /a/b/c 拆成 ["a","b","c"]
  *  - 用于逐层在红黑树中查找或创建节点
  */
-static int file_whitelist_collect_segments(const char *path,
-                                           struct path_segment **segments_out,
-                                           size_t *count_out) {
+static int trust_file_collect_segments(const char *path,
+                                       struct path_segment **segments_out,
+                                       size_t *count_out) {
   const char *cursor;
   size_t count = 0;
   size_t idx = 0;
@@ -326,8 +324,8 @@ static int file_whitelist_collect_segments(const char *path,
   return 0;
 }
 
-static char *file_whitelist_normalize_alloc(const char *path,
-                                            size_t *normalized_len) {
+static char *trust_file_normalize_alloc(const char *path,
+                                        size_t *normalized_len) {
   char *normalized;
   int ret;
 
@@ -340,8 +338,7 @@ static char *file_whitelist_normalize_alloc(const char *path,
     return NULL;
   }
 
-  ret = file_whitelist_normalize(path, normalized, PATH_MAX, normalized_len,
-                                 NULL);
+  ret = trust_file_normalize(path, normalized, PATH_MAX, normalized_len, NULL);
   if (ret) {
     kfree(normalized);
     return NULL;
@@ -351,16 +348,16 @@ static char *file_whitelist_normalize_alloc(const char *path,
 }
 
 /* 自底向上清理空目录，保持树结构紧凑。 */
-static void file_whitelist_prune_from(struct file_whitelist_node *node) {
+static void trust_file_prune_from(struct trust_file_node *node) {
   while (node && node->parent) {
-    if (node->is_whitelist_entry) {
+    if (node->is_trust_entry) {
       break;
     }
     if (!RB_EMPTY_ROOT(&node->children)) {
       break;
     }
 
-    struct file_whitelist_node *parent = node->parent;
+    struct trust_file_node *parent = node->parent;
 
     rb_erase(&node->rb, &parent->children);
     kfree(node);
@@ -369,37 +366,37 @@ static void file_whitelist_prune_from(struct file_whitelist_node *node) {
 }
 
 /* 初始化文件白名单。 */
-int file_whitelist_init(void) {
-  struct file_whitelist_node *root;
+int trust_file_init(void) {
+  struct trust_file_node *root;
   int ret = 0;
 
-  root = file_whitelist_node_alloc("", 0, FILE_WHITELIST_NODE_DIR, GFP_KERNEL);
+  root = trust_file_node_alloc("", 0, TRUST_FILE_NODE_DIR, GFP_KERNEL);
   if (!root) {
     return -ENOMEM;
   }
 
-  write_lock(&file_whitelist_lock);
-  file_whitelist_clear_locked();
-  file_whitelist_root = root;
-  file_whitelist_count = 0;
-  write_unlock(&file_whitelist_lock);
+  write_lock(&trust_file_lock);
+  trust_file_clear_locked();
+  trust_file_root = root;
+  trust_file_count = 0;
+  write_unlock(&trust_file_lock);
 
   return ret;
 }
 
 /* 销毁文件白名单。 */
-void file_whitelist_exit(void) {
-  write_lock(&file_whitelist_lock);
-  file_whitelist_clear_locked();
-  write_unlock(&file_whitelist_lock);
+void trust_file_exit(void) {
+  write_lock(&trust_file_lock);
+  trust_file_clear_locked();
+  write_unlock(&trust_file_lock);
 }
 
 /* 添加白名单文件或目录树(目录以 '/' 结尾)。 */
-int file_whitelist_add(const char *path) {
-  struct file_whitelist_node **created_nodes = NULL;
+int trust_file_add(const char *path) {
+  struct trust_file_node **created_nodes = NULL;
   /* node 指向当前遍历节点，child 为查找到/新建的子节点。 */
-  struct file_whitelist_node *node;
-  struct file_whitelist_node *child;
+  struct trust_file_node *node;
+  struct trust_file_node *child;
   struct path_segment *segments = NULL;
   size_t created_count = 0;
   size_t segment_count = 0;
@@ -414,13 +411,13 @@ int file_whitelist_add(const char *path) {
   }
 
   /* 先对输入路径进行标准化处理，并识别目标类型。 */
-  ret = file_whitelist_normalize(path, normalized, PATH_MAX, &normalized_len,
-                                 &target_is_dir);
+  ret = trust_file_normalize(path, normalized, PATH_MAX, &normalized_len,
+                             &target_is_dir);
   if (ret) {
     goto out_free;
   }
 
-  ret = file_whitelist_collect_segments(normalized, &segments, &segment_count);
+  ret = trust_file_collect_segments(normalized, &segments, &segment_count);
   if (ret) {
     goto out_free;
   }
@@ -434,50 +431,48 @@ int file_whitelist_add(const char *path) {
     }
   }
 
-  write_lock(&file_whitelist_lock);
-  if (!file_whitelist_root) {
+  write_lock(&trust_file_lock);
+  if (!trust_file_root) {
     ret = -EINVAL;
     goto out_unlock;
   }
 
   /* 根目录是特殊情况：直接设置标记即可，无需遍历。 */
   if (normalized_len == 1 && normalized[0] == '/') {
-    if (file_whitelist_root->is_whitelist_entry) {
+    if (trust_file_root->is_trust_entry) {
       ret = 0;
       goto out_unlock;
     }
-    if (file_whitelist_count >= FILE_WHITELIST_MAX) {
+    if (trust_file_count >= TRUST_FILE_MAX) {
       ret = -E2BIG;
       goto out_unlock;
     }
-    file_whitelist_root->is_whitelist_entry = true;
-    file_whitelist_count++;
-    pr_info("file_whitelist: added directory \"/\" (count=%zu)\n",
-            file_whitelist_count);
+    trust_file_root->is_trust_entry = true;
+    trust_file_count++;
+    pr_info("trust_file: added directory \"/\" (count=%zu)\n",
+            trust_file_count);
     ret = 0;
     goto out_unlock;
   }
 
-  node = file_whitelist_root;
+  node = trust_file_root;
   size_t i;
   for (i = 0; i < segment_count; i++) {
     bool last = (i == segment_count - 1);
-    enum file_whitelist_node_type expected_type = last && !target_is_dir
-                                                      ? FILE_WHITELIST_NODE_FILE
-                                                      : FILE_WHITELIST_NODE_DIR;
+    enum trust_file_node_type expected_type =
+        last && !target_is_dir ? TRUST_FILE_NODE_FILE : TRUST_FILE_NODE_DIR;
 
     /* 查找当前段的子节点，必要时创建新的节点并挂载到树上。 */
-    child =
-        file_whitelist_lookup_child(node, segments[i].start, segments[i].len);
+    child = trust_file_lookup_child(node, segments[i].start, segments[i].len);
     if (!child) {
-      child = file_whitelist_node_alloc(segments[i].start, segments[i].len,
-                                        expected_type, GFP_ATOMIC);
+      child = trust_file_node_alloc(segments[i].start, segments[i].len,
+                                    expected_type, GFP_ATOMIC);
       if (!child) {
         ret = -ENOMEM;
         goto rollback;
       }
 
-      ret = file_whitelist_insert_child(node, child);
+      ret = trust_file_insert_child(node, child);
       if (ret) {
         kfree(child);
         goto rollback;
@@ -485,15 +480,15 @@ int file_whitelist_add(const char *path) {
 
       created_nodes[created_count++] = child;
     } else {
-      if (!last && child->type != FILE_WHITELIST_NODE_DIR) {
+      if (!last && child->type != TRUST_FILE_NODE_DIR) {
         ret = -ENOTDIR;
         goto rollback;
       }
-      if (last && target_is_dir && child->type != FILE_WHITELIST_NODE_DIR) {
+      if (last && target_is_dir && child->type != TRUST_FILE_NODE_DIR) {
         ret = -ENOTDIR;
         goto rollback;
       }
-      if (last && !target_is_dir && child->type != FILE_WHITELIST_NODE_FILE) {
+      if (last && !target_is_dir && child->type != TRUST_FILE_NODE_FILE) {
         ret = -EISDIR;
         goto rollback;
       }
@@ -507,33 +502,33 @@ int file_whitelist_add(const char *path) {
     goto rollback;
   }
 
-  if (node->is_whitelist_entry) {
+  if (node->is_trust_entry) {
     ret = 0;
     goto out_unlock;
   }
 
-  if (file_whitelist_count >= FILE_WHITELIST_MAX) {
+  if (trust_file_count >= TRUST_FILE_MAX) {
     ret = -E2BIG;
     goto rollback;
   }
 
-  node->is_whitelist_entry = true;
-  file_whitelist_count++;
-  pr_info("file_whitelist: added %s \"%s\" (count=%zu)\n",
-          node->type == FILE_WHITELIST_NODE_DIR ? "directory" : "file",
-          normalized, file_whitelist_count);
+  node->is_trust_entry = true;
+  trust_file_count++;
+  pr_info("trust_file: added %s \"%s\" (count=%zu)\n",
+          node->type == TRUST_FILE_NODE_DIR ? "directory" : "file", normalized,
+          trust_file_count);
   ret = 0;
   goto out_unlock;
 
 rollback:
   while (created_count) {
     /* 回滚阶段：释放在失败前新建的节点，避免内存泄漏。 */
-    struct file_whitelist_node *created = created_nodes[--created_count];
+    struct trust_file_node *created = created_nodes[--created_count];
     if (!created) {
       continue;
     }
 
-    if (!RB_EMPTY_ROOT(&created->children) || created->is_whitelist_entry) {
+    if (!RB_EMPTY_ROOT(&created->children) || created->is_trust_entry) {
       continue;
     }
 
@@ -544,7 +539,7 @@ rollback:
   }
 
 out_unlock:
-  write_unlock(&file_whitelist_lock);
+  write_unlock(&trust_file_lock);
 
 out_free:
   kfree(created_nodes);
@@ -554,10 +549,10 @@ out_free:
 }
 
 /* 移除白名单文件或目录树(目录以 '/' 结尾)。 */
-int file_whitelist_remove(const char *path) {
-  struct file_whitelist_node *node;
+int trust_file_remove(const char *path) {
+  struct trust_file_node *node;
   /* parent 用于在删除文件节点后回溯修剪空目录。 */
-  struct file_whitelist_node *parent;
+  struct trust_file_node *parent;
   struct path_segment *segments = NULL;
   size_t segment_count = 0;
   size_t normalized_len = 0;
@@ -571,53 +566,52 @@ int file_whitelist_remove(const char *path) {
   }
 
   /* 与添加逻辑一致，确保对同一路径进行相同的标准化处理。 */
-  ret = file_whitelist_normalize(path, normalized, PATH_MAX, &normalized_len,
-                                 &target_is_dir);
+  ret = trust_file_normalize(path, normalized, PATH_MAX, &normalized_len,
+                             &target_is_dir);
   if (ret) {
     goto out_free;
   }
 
-  ret = file_whitelist_collect_segments(normalized, &segments, &segment_count);
+  ret = trust_file_collect_segments(normalized, &segments, &segment_count);
   if (ret) {
     goto out_free;
   }
 
-  write_lock(&file_whitelist_lock);
-  if (!file_whitelist_root) {
+  write_lock(&trust_file_lock);
+  if (!trust_file_root) {
     ret = -EINVAL;
     goto out_unlock;
   }
 
   /* 根目录的删除只需要重置白名单条目标记。 */
   if (normalized_len == 1 && normalized[0] == '/') {
-    if (!file_whitelist_root->is_whitelist_entry) {
+    if (!trust_file_root->is_trust_entry) {
       ret = -ENOENT;
       goto out_unlock;
     }
-    file_whitelist_root->is_whitelist_entry = false;
-    if (file_whitelist_count > 0) {
-      file_whitelist_count--;
+    trust_file_root->is_trust_entry = false;
+    if (trust_file_count > 0) {
+      trust_file_count--;
     }
-    pr_info("file_whitelist: removed directory \"/\" (count=%zu)\n",
-            file_whitelist_count);
+    pr_info("trust_file: removed directory \"/\" (count=%zu)\n",
+            trust_file_count);
     ret = 0;
     goto out_unlock;
   }
 
-  node = file_whitelist_root;
+  node = trust_file_root;
   size_t i;
   for (i = 0; i < segment_count; i++) {
     bool last = (i == segment_count - 1);
 
     /* 自顶向下查找链路；如遇缺失立即返回未找到。 */
-    node =
-        file_whitelist_lookup_child(node, segments[i].start, segments[i].len);
+    node = trust_file_lookup_child(node, segments[i].start, segments[i].len);
     if (!node) {
       ret = -ENOENT;
       goto out_unlock;
     }
 
-    if (!last && node->type != FILE_WHITELIST_NODE_DIR) {
+    if (!last && node->type != TRUST_FILE_NODE_DIR) {
       ret = -ENOTDIR;
       goto out_unlock;
     }
@@ -630,28 +624,28 @@ int file_whitelist_remove(const char *path) {
   }
 
   if (target_is_dir) {
-    if (node->type != FILE_WHITELIST_NODE_DIR) {
+    if (node->type != TRUST_FILE_NODE_DIR) {
       ret = -ENOTDIR;
       goto out_unlock;
     }
-    if (!node->is_whitelist_entry) {
+    if (!node->is_trust_entry) {
       ret = -ENOENT;
       goto out_unlock;
     }
 
-    node->is_whitelist_entry = false;
-    if (file_whitelist_count > 0) {
-      file_whitelist_count--;
+    node->is_trust_entry = false;
+    if (trust_file_count > 0) {
+      trust_file_count--;
     }
-    pr_info("file_whitelist: removed directory \"%s\" (count=%zu)\n",
-            normalized, file_whitelist_count);
-    file_whitelist_prune_from(node);
+    pr_info("trust_file: removed directory \"%s\" (count=%zu)\n", normalized,
+            trust_file_count);
+    trust_file_prune_from(node);
   } else {
-    if (node->type != FILE_WHITELIST_NODE_FILE) {
+    if (node->type != TRUST_FILE_NODE_FILE) {
       ret = -EISDIR;
       goto out_unlock;
     }
-    if (!node->is_whitelist_entry) {
+    if (!node->is_trust_entry) {
       ret = -ENOENT;
       goto out_unlock;
     }
@@ -659,18 +653,18 @@ int file_whitelist_remove(const char *path) {
     parent = node->parent;
     rb_erase(&node->rb, &parent->children);
     kfree(node);
-    if (file_whitelist_count > 0) {
-      file_whitelist_count--;
+    if (trust_file_count > 0) {
+      trust_file_count--;
     }
-    pr_info("file_whitelist: removed file \"%s\" (count=%zu)\n", normalized,
-            file_whitelist_count);
-    file_whitelist_prune_from(parent);
+    pr_info("trust_file: removed file \"%s\" (count=%zu)\n", normalized,
+            trust_file_count);
+    trust_file_prune_from(parent);
   }
 
   ret = 0;
 
 out_unlock:
-  write_unlock(&file_whitelist_lock);
+  write_unlock(&trust_file_lock);
 
 out_free:
   kfree(segments);
@@ -683,18 +677,18 @@ out_free:
  *  - 支持目录节点的递归继承：父目录是白名单条目时，子路径一并放行
  *  - 对于缺失节点，返回最近一个白名单目录前缀的继承状态
  */
-static bool file_whitelist_contains_locked(const char *normalized,
-                                           size_t normalized_len) {
-  struct file_whitelist_node *node;
+static bool trust_file_contains_locked(const char *normalized,
+                                       size_t normalized_len) {
+  struct trust_file_node *node;
   bool inherited_permission;
   const char *cursor;
 
-  node = file_whitelist_root;
+  node = trust_file_root;
   if (!node) {
     return false;
   }
 
-  inherited_permission = node->is_whitelist_entry;
+  inherited_permission = node->is_trust_entry;
 
   if (normalized_len == 1 && normalized[0] == '/') {
     return inherited_permission;
@@ -713,23 +707,23 @@ static bool file_whitelist_contains_locked(const char *normalized,
       continue;
     }
 
-    node = file_whitelist_lookup_child(node, cursor, seg_len);
+    node = trust_file_lookup_child(node, cursor, seg_len);
     if (!node) {
       return inherited_permission;
     }
 
-    if (node->type == FILE_WHITELIST_NODE_DIR && node->is_whitelist_entry) {
+    if (node->type == TRUST_FILE_NODE_DIR && node->is_trust_entry) {
       inherited_permission = true;
     }
 
     if (*next == '\0') {
-      if (node->is_whitelist_entry) {
+      if (node->is_trust_entry) {
         return true;
       }
       return inherited_permission;
     }
 
-    if (node->type != FILE_WHITELIST_NODE_DIR) {
+    if (node->type != TRUST_FILE_NODE_DIR) {
       return inherited_permission;
     }
 
@@ -740,38 +734,38 @@ static bool file_whitelist_contains_locked(const char *normalized,
 }
 
 /* 判断路径是否在白名单中或是否在白名单目录下(目录以 '/' 结尾)。 */
-bool file_whitelist_contains(const char *path) {
+bool trust_file_contains(const char *path) {
   char *normalized;
   size_t normalized_len = 0;
   bool contains = false;
 
-  normalized = file_whitelist_normalize_alloc(path, &normalized_len);
+  normalized = trust_file_normalize_alloc(path, &normalized_len);
   if (!normalized) {
     return false;
   }
 
-  read_lock(&file_whitelist_lock);
-  if (!file_whitelist_root || !file_whitelist_count) {
+  read_lock(&trust_file_lock);
+  if (!trust_file_root || !trust_file_count) {
     contains = false;
     goto out_unlock;
   }
 
-  contains = file_whitelist_contains_locked(normalized, normalized_len);
+  contains = trust_file_contains_locked(normalized, normalized_len);
 
 out_unlock:
-  read_unlock(&file_whitelist_lock);
+  read_unlock(&trust_file_lock);
   kfree(normalized);
   return contains;
 }
 
-static int file_whitelist_param_set(const char *val,
-                                    const struct kernel_param *kp) {
+static int trust_file_param_set(const char *val,
+                                const struct kernel_param *kp) {
   return -EPERM;
 }
 
 /* 将格式化字符串安全追加到输出缓冲区，并维护写入统计。 */
-static void file_whitelist_param_append(char **cursor, size_t *remaining,
-                                        size_t *total, const char *str) {
+static void trust_file_param_append(char **cursor, size_t *remaining,
+                                    size_t *total, const char *str) {
   size_t written;
 
   if (!*remaining) {
@@ -799,9 +793,9 @@ static void file_whitelist_param_append(char **cursor, size_t *remaining,
  *  - 每一层使用两个空格缩进，目录以 '/' 结尾
  *  - 白名单条目节点追加 " *" 标记，便于快速识别放行范围
  */
-static void file_whitelist_emit_tree(struct file_whitelist_node *node,
-                                     char **cursor, size_t *remaining,
-                                     size_t *total, unsigned depth) {
+static void trust_file_emit_tree(struct trust_file_node *node, char **cursor,
+                                 size_t *remaining, size_t *total,
+                                 unsigned depth) {
   struct rb_node *rb;
   unsigned i;
 
@@ -810,51 +804,49 @@ static void file_whitelist_emit_tree(struct file_whitelist_node *node,
   }
 
   if (depth == 0) {
-    file_whitelist_param_append(cursor, remaining, total, "/");
-    if (node->is_whitelist_entry) {
-      file_whitelist_param_append(cursor, remaining, total, " *");
+    trust_file_param_append(cursor, remaining, total, "/");
+    if (node->is_trust_entry) {
+      trust_file_param_append(cursor, remaining, total, " *");
     }
-    file_whitelist_param_append(cursor, remaining, total, "\n");
+    trust_file_param_append(cursor, remaining, total, "\n");
   } else {
     for (i = 0; i < depth && *remaining; ++i) {
-      file_whitelist_param_append(cursor, remaining, total, "  ");
+      trust_file_param_append(cursor, remaining, total, "  ");
     }
     if (!*remaining) {
       return;
     }
 
-    file_whitelist_param_append(cursor, remaining, total, node->name);
+    trust_file_param_append(cursor, remaining, total, node->name);
     if (!*remaining) {
       return;
     }
 
-    if (node->type == FILE_WHITELIST_NODE_DIR) {
-      file_whitelist_param_append(cursor, remaining, total, "/");
+    if (node->type == TRUST_FILE_NODE_DIR) {
+      trust_file_param_append(cursor, remaining, total, "/");
       if (!*remaining) {
         return;
       }
     }
 
-    if (node->is_whitelist_entry) {
-      file_whitelist_param_append(cursor, remaining, total, " *");
+    if (node->is_trust_entry) {
+      trust_file_param_append(cursor, remaining, total, " *");
       if (!*remaining) {
         return;
       }
     }
 
-    file_whitelist_param_append(cursor, remaining, total, "\n");
+    trust_file_param_append(cursor, remaining, total, "\n");
   }
 
   for (rb = rb_first(&node->children); rb && *remaining; rb = rb_next(rb)) {
-    struct file_whitelist_node *child =
-        rb_entry(rb, struct file_whitelist_node, rb);
+    struct trust_file_node *child = rb_entry(rb, struct trust_file_node, rb);
 
-    file_whitelist_emit_tree(child, cursor, remaining, total, depth + 1);
+    trust_file_emit_tree(child, cursor, remaining, total, depth + 1);
   }
 }
 
-static int file_whitelist_param_get(char *buffer,
-                                    const struct kernel_param *kp) {
+static int trust_file_param_get(char *buffer, const struct kernel_param *kp) {
   char *cursor = buffer;
   size_t remaining = PAGE_SIZE;
   size_t total = 0;
@@ -864,30 +856,30 @@ static int file_whitelist_param_get(char *buffer,
     return -EINVAL;
   }
 
-  read_lock(&file_whitelist_lock);
-  if (!file_whitelist_root) {
+  read_lock(&trust_file_lock);
+  if (!trust_file_root) {
     /* 白名单尚未初始化时返回占位信息，避免空指针访问。 */
     total = scnprintf(buffer, PAGE_SIZE, "<uninitialized>\n");
-    read_unlock(&file_whitelist_lock);
+    read_unlock(&trust_file_lock);
     return (int)total;
   }
 
-  empty = (file_whitelist_count == 0);
-  file_whitelist_emit_tree(file_whitelist_root, &cursor, &remaining, &total, 0);
+  empty = (trust_file_count == 0);
+  trust_file_emit_tree(trust_file_root, &cursor, &remaining, &total, 0);
   if (empty && remaining) {
     /* 仅根节点存在，但没有任何允许条目。 */
-    file_whitelist_param_append(&cursor, &remaining, &total, "(empty)\n");
+    trust_file_param_append(&cursor, &remaining, &total, "(empty)\n");
   }
 
-  read_unlock(&file_whitelist_lock);
+  read_unlock(&trust_file_lock);
   return (int)total;
 }
 
-static const struct kernel_param_ops file_whitelist_ops = {
-    .set = file_whitelist_param_set,
-    .get = file_whitelist_param_get,
+static const struct kernel_param_ops trust_file_ops = {
+    .set = trust_file_param_set,
+    .get = trust_file_param_get,
 };
 
-module_param_cb(file_whitelist, &file_whitelist_ops, NULL, 0444);
-MODULE_PARM_DESC(file_whitelist, "List of files and directories "
-                                 "allowed by the event listeners.");
+module_param_cb(trust_file, &trust_file_ops, NULL, 0444);
+MODULE_PARM_DESC(trust_file, "List of files and directories "
+                             "allowed by the event listeners.");

@@ -2,22 +2,17 @@ mod netlink;
 mod tcm;
 mod undo;
 
-use std::path::{Component, Path};
-use std::sync::Arc;
-
+use crate::netlink::*;
+use crate::tcm::*;
+use crate::undo::*;
 use anyhow::{Context, Result, anyhow};
 use genetlink::new_connection;
 use log::{debug, error, info, warn};
 use netlink_proto::sys::AsyncSocket;
+use std::path::{Component, Path};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout};
 use tokio::signal;
-
-use crate::netlink::{TcmGenlBroadcastListener, TcmGenlClient, resolve_family_info};
-use crate::tcm::{
-    TcmEventHandler, TcmFileEvent, TcmFileMonitorStats, TcmPayload, TcmProcEvent, genl_family_name,
-    genl_family_version, genl_mcgrp_name, handle_raw_message,
-};
-use crate::undo::{UndoRedoManager, WhitelistAction};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -92,11 +87,11 @@ async fn main() -> Result<()> {
         stdout.write_all("请选择工作模式:\n".as_bytes()).await?;
         stdout.write_all("1. 统计文件监控信息\n".as_bytes()).await?;
         stdout.write_all("2. 接收内核广播消息".as_bytes()).await?;
-        stdout.write_all(" (Ctrl+C 返回菜单)\n".as_bytes()).await?;
+        stdout.write_all("   CTRL+C 返回菜单\n".as_bytes()).await?;
         stdout.write_all("3. 添加信任文件[夹]\n".as_bytes()).await?;
         stdout.write_all("4. 移除信任文件[夹]\n".as_bytes()).await?;
-        stdout.write_all("5. 添加信任进程\n".as_bytes()).await?;
-        stdout.write_all("6. 移除信任进程\n".as_bytes()).await?;
+        stdout.write_all("5. 添加信任进程[组]\n".as_bytes()).await?;
+        stdout.write_all("6. 移除信任进程[组]\n".as_bytes()).await?;
         stdout.write_all("7. 撤销上一次操作\n".as_bytes()).await?;
         stdout.write_all("8. 重做上一次撤销\n".as_bytes()).await?;
         stdout.write_all("9. 打印撤销/重做栈\n".as_bytes()).await?;
@@ -154,7 +149,7 @@ async fn main() -> Result<()> {
 
                 match client.put_trust_path(&path).await {
                     Ok(()) => {
-                        undo_redo.record(WhitelistAction::FileAdd(path.clone()));
+                        undo_redo.record(TrustAction::TrustFileAdd(path.clone()));
                         stdout.write_all("信任文件[夹]已更新\n".as_bytes()).await?;
                     }
                     Err(err) => {
@@ -182,7 +177,7 @@ async fn main() -> Result<()> {
 
                 match client.distrust_path(&path).await {
                     Ok(()) => {
-                        undo_redo.record(WhitelistAction::FileRemove(path.clone()));
+                        undo_redo.record(TrustAction::TrustFileRemove(path.clone()));
                         stdout.write_all("信任文件[夹]已更新\n".as_bytes()).await?;
                     }
                     Err(err) => {
@@ -194,7 +189,7 @@ async fn main() -> Result<()> {
                 }
             }
             "5" => {
-                let (pid, include_children) = match prompt_pid(
+                let pid = match prompt_pid(
                     &mut stdout,
                     &mut stdin,
                     "请输入要添加信任的进程 PID(负数表示单个进程，正数表示进程树): ",
@@ -208,19 +203,13 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                match client
-                    .put_trust_proc_list(vec![pid], include_children)
-                    .await
-                {
+                match client.put_trust_proc_list(vec![pid]).await {
                     Ok(()) => {
-                        undo_redo.record(WhitelistAction::ProcAdd {
-                            pid,
-                            include_children,
-                        });
-                        stdout.write_all("信任进程已更新\n".as_bytes()).await?;
+                        undo_redo.record(TrustAction::TrustProcAdd(pid));
+                        stdout.write_all("信任进程[组]已更新\n".as_bytes()).await?;
                     }
                     Err(err) => {
-                        warn!("添加信任进程失败: {err:?}");
+                        warn!("添加信任进程[组]失败: {err:?}");
                         stdout
                             .write_all(format!("错误: {err:?}\n").as_bytes())
                             .await?;
@@ -228,7 +217,7 @@ async fn main() -> Result<()> {
                 }
             }
             "6" => {
-                let (pid, include_children) = match prompt_pid(
+                let pid = match prompt_pid(
                     &mut stdout,
                     &mut stdin,
                     "请输入要移除的进程 PID(负数表示单个进程，正数表示进程树): ",
@@ -242,16 +231,13 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                match client.distrust_proc(pid, include_children).await {
+                match client.distrust_proc(pid).await {
                     Ok(()) => {
-                        stdout.write_all("信任进程已更新\n".as_bytes()).await?;
-                        undo_redo.record(WhitelistAction::ProcRemove {
-                            pid,
-                            include_children,
-                        });
+                        stdout.write_all("信任进程[组]已更新\n".as_bytes()).await?;
+                        undo_redo.record(TrustAction::TrustProcRemove(pid));
                     }
                     Err(err) => {
-                        warn!("移除信任进程失败: {err:?}");
+                        warn!("移除信任进程[组]失败: {err:?}");
                         stdout
                             .write_all(format!("错误: {err:?}\n").as_bytes())
                             .await?;
@@ -397,7 +383,7 @@ async fn prompt_pid(
     stdout: &mut tokio::io::Stdout,
     stdin: &mut BufReader<tokio::io::Stdin>,
     prompt: &str,
-) -> Result<Option<(i32, bool)>> {
+) -> Result<Option<i32>> {
     loop {
         match prompt_line(stdout, stdin, prompt).await? {
             None => return Ok(None),
@@ -406,8 +392,7 @@ async fn prompt_pid(
             }
             Some(input) => match input.parse::<i32>() {
                 Ok(pid) if pid != 0 => {
-                    let include_children = pid > 0;
-                    return Ok(Some((pid.abs(), include_children)));
+                    return Ok(Some(pid));
                 }
                 _ => {
                     stdout.write_all("PID 无效\n".as_bytes()).await?;

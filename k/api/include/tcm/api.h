@@ -29,10 +29,10 @@ enum tcm_genl_cmd {
   __TCM_GENL_CMD_OPS_MIN,
   TCM_GENL_CMD_LOGIN,
   TCM_GENL_CMD_GET_FILE_STATS,
-  TCM_GENL_CMD_PROC_WHITELIST_ADD,
-  TCM_GENL_CMD_PROC_WHITELIST_REMOVE,
-  TCM_GENL_CMD_FILE_WHITELIST_ADD,
-  TCM_GENL_CMD_FILE_WHITELIST_REMOVE,
+  TCM_GENL_CMD_TRUST_PROC_ADD,
+  TCM_GENL_CMD_TRUST_PROC_REMOVE,
+  TCM_GENL_CMD_TRUST_FILE_ADD,
+  TCM_GENL_CMD_TRUST_FILE_REMOVE,
   __TCM_GENL_CMD_OPS_MAX,
   __TCM_GENL_CMD_EVENTS_MIN,
   TCM_GENL_CMD_PROC_EVENT,
@@ -90,15 +90,15 @@ typedef struct {
 
 typedef struct {
   const char **paths;
-} file_whitelist_add_op_t;
+} trust_file_add_op_t;
 
-typedef file_whitelist_add_op_t file_whitelist_remove_op_t;
+typedef trust_file_add_op_t trust_file_remove_op_t;
 
 typedef struct {
   s32 *procs;
-} proc_whitelist_add_op_t;
+} trust_proc_add_op_t;
 
-typedef proc_whitelist_add_op_t proc_whitelist_remove_op_t;
+typedef trust_proc_add_op_t trust_proc_remove_op_t;
 
 /* genetlink 多播组。 */
 enum tcm_genl_mcgrp {

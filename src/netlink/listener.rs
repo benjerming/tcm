@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use futures::{Stream, stream::StreamExt};
 use genetlink::message::RawGenlMessage;
 use netlink_packet_core::NetlinkMessage;
+use std::sync::Arc;
 use tokio::{select, sync::watch, task::JoinHandle};
 
 type MessageStream = Box<

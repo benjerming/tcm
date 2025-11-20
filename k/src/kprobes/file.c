@@ -19,8 +19,8 @@
 #include "tcm/common.h"
 #include "tcm/kprobes/core.h"
 #include "tcm/kprobes/file.h"
-#include "tcm/whitelist/file.h"
-#include "tcm/whitelist/proc.h"
+#include "tcm/trust/file.h"
+#include "tcm/trust/proc.h"
 
 /*
  * 文件事件监听器：
@@ -472,7 +472,7 @@ static void file_event_workfn(struct work_struct *work) {
 
   if (!event_work->event.path[0]) {
     should_emit = false;
-  } else if (file_whitelist_contains(event_work->event.path)) {
+  } else if (trust_file_contains(event_work->event.path)) {
     should_emit = false;
   }
 
@@ -525,7 +525,7 @@ static int queue_file_event(file_listener_t *listener,
   pid = task_tgid_nr(current);
 
   /* PID 在白名单中时直接忽略并归还引用。 */
-  if (proc_whitelist_contains(pid)) {
+  if (trust_proc_contains(pid)) {
     if (file) {
       fput(file);
     }

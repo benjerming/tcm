@@ -14,8 +14,8 @@
 #include "tcm/genl.h"
 #include "tcm/kprobes/file.h"
 #include "tcm/login.h"
-#include "tcm/whitelist/file.h"
-#include "tcm/whitelist/proc.h"
+#include "tcm/trust/file.h"
+#include "tcm/trust/proc.h"
 
 /*
  * 通用 Netlink 核心：
@@ -35,7 +35,7 @@ struct genl_core {
 };
 
 static const struct nla_policy
-    file_whitelist_path_policy[TCM_GENL_PATH_LIST_ATTR_MAX] = {
+    trust_file_path_policy[TCM_GENL_PATH_LIST_ATTR_MAX] = {
         [TCM_GENL_PATH_LIST_ATTR_FILE_ENTRY] =
             {
                 .type = NLA_NUL_STRING,
@@ -44,7 +44,7 @@ static const struct nla_policy
 };
 
 static const struct nla_policy
-    proc_whitelist_path_policy[TCM_GENL_PROC_LIST_ATTR_MAX] = {
+    trust_proc_path_policy[TCM_GENL_PROC_LIST_ATTR_MAX] = {
         [TCM_GENL_PROC_LIST_ATTR_PROC_ENTRY] =
             {
                 .type = NLA_S32,
@@ -203,9 +203,9 @@ static int genl_core_handle_login(struct sk_buff *skb, struct genl_info *info) {
     return ret;
   }
 
-  ret = proc_whitelist_add(info->snd_portid, true);
+  ret = trust_proc_add(info->snd_portid, true);
   if (ret != 0 && ret != -EEXIST) {
-    pr_warn("%s: pid_whitelist_add failed for pid=%d: %d\n", __func__,
+    pr_warn("%s: trust_proc_add failed for pid=%d: %d\n", __func__,
             info->snd_portid, ret);
     return ret;
   }
@@ -228,8 +228,8 @@ static void free_proc_list(s32 *procs) {
   kfree(procs);
 }
 
-static int genl_core_parse_file_whitelist_add_op(struct genl_info *info,
-                                                 file_whitelist_add_op_t *op) {
+static int genl_core_parse_trust_file_add_op(struct genl_info *info,
+                                             trust_file_add_op_t *op) {
   int ret;
   struct nlattr *path_list;
 
@@ -245,9 +245,9 @@ static int genl_core_parse_file_whitelist_add_op(struct genl_info *info,
 
   path_list = info->attrs[TCM_GENL_ATTR_PATH_LIST];
   ret = nla_validate_nested(path_list, TCM_GENL_PATH_LIST_ATTR_MAX - 1,
-                            file_whitelist_path_policy, NULL);
+                            trust_file_path_policy, NULL);
   if (ret) {
-    pr_warn("%s: invalid file_whitelist_add path list: %d\n", __func__, ret);
+    pr_warn("%s: invalid trust_file_add path list: %d\n", __func__, ret);
     return ret;
   }
 
@@ -260,14 +260,13 @@ static int genl_core_parse_file_whitelist_add_op(struct genl_info *info,
   return 0;
 }
 
-static int
-genl_core_parse_file_whitelist_remove_op(struct genl_info *info,
-                                         file_whitelist_remove_op_t *op) {
-  return genl_core_parse_file_whitelist_add_op(info, op);
+static int genl_core_parse_trust_file_remove_op(struct genl_info *info,
+                                                trust_file_remove_op_t *op) {
+  return genl_core_parse_trust_file_add_op(info, op);
 }
 
-static int genl_core_parse_proc_whitelist_add_op(struct genl_info *info,
-                                                 proc_whitelist_add_op_t *op) {
+static int genl_core_parse_trust_proc_add_op(struct genl_info *info,
+                                             trust_proc_add_op_t *op) {
   int ret;
   struct nlattr *proc_list;
 
@@ -281,9 +280,9 @@ static int genl_core_parse_proc_whitelist_add_op(struct genl_info *info,
 
   proc_list = info->attrs[TCM_GENL_ATTR_PROC_LIST];
   ret = nla_validate_nested(proc_list, TCM_GENL_PROC_LIST_ATTR_MAX - 1,
-                            proc_whitelist_path_policy, NULL);
+                            trust_proc_path_policy, NULL);
   if (ret) {
-    pr_warn("%s: invalid proc_whitelist_add proc list: %d\n", __func__, ret);
+    pr_warn("%s: invalid trust_proc_add proc list: %d\n", __func__, ret);
     return ret;
   }
 
@@ -295,10 +294,9 @@ static int genl_core_parse_proc_whitelist_add_op(struct genl_info *info,
   return 0;
 }
 
-static int
-genl_core_parse_proc_whitelist_remove_op(struct genl_info *info,
-                                         proc_whitelist_remove_op_t *op) {
-  return genl_core_parse_proc_whitelist_add_op(info, op);
+static int genl_core_parse_trust_proc_remove_op(struct genl_info *info,
+                                                trust_proc_remove_op_t *op) {
+  return genl_core_parse_trust_proc_add_op(info, op);
 }
 
 /* 应答文件监听器统计信息的查询命令。 */
@@ -396,9 +394,9 @@ err_cancel:
 }
 
 /* 处理添加白名单路径的 Netlink 命令。 */
-static int genl_core_handle_file_whitelist_add(struct sk_buff *skb,
-                                               struct genl_info *info) {
-  file_whitelist_add_op_t op = {.paths = NULL};
+static int genl_core_handle_trust_file_add(struct sk_buff *skb,
+                                           struct genl_info *info) {
+  trust_file_add_op_t op = {.paths = NULL};
   int ret;
   const char *path;
 
@@ -408,17 +406,17 @@ static int genl_core_handle_file_whitelist_add(struct sk_buff *skb,
   }
 
   /* 从报文中解析出目标白名单路径。 */
-  ret = genl_core_parse_file_whitelist_add_op(info, &op);
+  ret = genl_core_parse_trust_file_add_op(info, &op);
   if (ret) {
-    pr_warn("%s: failed to parse add whitelist request: %d\n", __func__, ret);
+    pr_warn("%s: failed to parse add trust_file request: %d\n", __func__, ret);
     return ret;
   }
 
   for (const char **cursor = op.paths; cursor && *cursor; cursor++) {
     path = *cursor;
-    ret = file_whitelist_add(path);
+    ret = trust_file_add(path);
     if (ret && ret != -EEXIST) {
-      pr_warn("%s: file_whitelist_add failed for \"%s\": %d\n", __func__, path,
+      pr_warn("%s: trust_file_add failed for \"%s\": %d\n", __func__, path,
               ret);
       break;
     }
@@ -429,9 +427,9 @@ static int genl_core_handle_file_whitelist_add(struct sk_buff *skb,
 }
 
 /* 处理移除白名单路径的 Netlink 命令。 */
-static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
-                                                  struct genl_info *info) {
-  file_whitelist_remove_op_t op = {.paths = NULL};
+static int genl_core_handle_trust_file_remove(struct sk_buff *skb,
+                                              struct genl_info *info) {
+  trust_file_remove_op_t op = {.paths = NULL};
   int ret;
   const char *path;
 
@@ -441,19 +439,19 @@ static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
   }
 
   /* 与添加路径共用解析逻辑，确保输入一致性。 */
-  ret = genl_core_parse_file_whitelist_remove_op(info, &op);
+  ret = genl_core_parse_trust_file_remove_op(info, &op);
   if (ret) {
-    pr_warn("%s: failed to parse remove whitelist request: %d\n", __func__,
+    pr_warn("%s: failed to parse remove trust_file request: %d\n", __func__,
             ret);
     return ret;
   }
 
   for (const char **cursor = op.paths; cursor && *cursor; cursor++) {
     path = *cursor;
-    ret = file_whitelist_remove(path);
+    ret = trust_file_remove(path);
     if (ret && ret != -ENOENT) {
-      pr_warn("%s: file_whitelist_remove failed for \"%s\": %d\n", __func__,
-              path, ret);
+      pr_warn("%s: trust_file_remove failed for \"%s\": %d\n", __func__, path,
+              ret);
       break;
     }
   }
@@ -462,10 +460,10 @@ static int genl_core_handle_file_whitelist_remove(struct sk_buff *skb,
   return ret;
 }
 
-static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
-                                               struct genl_info *info) {
+static int genl_core_handle_trust_proc_add(struct sk_buff *skb,
+                                           struct genl_info *info) {
   int ret;
-  proc_whitelist_add_op_t op = {.procs = NULL};
+  trust_proc_add_op_t op = {.procs = NULL};
   s32 *proc;
 
   ret = genl_core_require_client_login(info, NULL);
@@ -473,17 +471,16 @@ static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
     return ret;
   }
 
-  ret = genl_core_parse_proc_whitelist_add_op(info, &op);
+  ret = genl_core_parse_trust_proc_add_op(info, &op);
   if (ret) {
-    pr_warn("%s: failed to parse add proc whitelist request: %d\n", __func__,
-            ret);
+    pr_warn("%s: failed to parse add trust_proc request: %d\n", __func__, ret);
     return ret;
   }
 
   for (proc = op.procs; *proc; proc++) {
-    ret = proc_whitelist_add(abs(*proc), *proc > 0);
+    ret = trust_proc_add(abs(*proc), *proc > 0);
     if (ret && ret != -EEXIST) {
-      pr_warn("%s: pid_whitelist_add failed for proc=%d: %d\n", __func__, *proc,
+      pr_warn("%s: trust_proc_add failed for proc=%d: %d\n", __func__, *proc,
               ret);
       break;
     }
@@ -493,10 +490,10 @@ static int genl_core_handle_proc_whitelist_add(struct sk_buff *skb,
   return ret;
 }
 
-static int genl_core_handle_proc_whitelist_remove(struct sk_buff *skb,
-                                                  struct genl_info *info) {
+static int genl_core_handle_trust_proc_remove(struct sk_buff *skb,
+                                              struct genl_info *info) {
   int ret;
-  proc_whitelist_remove_op_t op = {.procs = NULL};
+  trust_proc_remove_op_t op = {.procs = NULL};
   s32 *proc;
 
   ret = genl_core_require_client_login(info, NULL);
@@ -504,18 +501,18 @@ static int genl_core_handle_proc_whitelist_remove(struct sk_buff *skb,
     return ret;
   }
 
-  ret = genl_core_parse_proc_whitelist_remove_op(info, &op);
+  ret = genl_core_parse_trust_proc_remove_op(info, &op);
   if (ret) {
-    pr_warn("%s: failed to parse remove proc whitelist request: %d\n", __func__,
+    pr_warn("%s: failed to parse remove trust_proc request: %d\n", __func__,
             ret);
     return ret;
   }
 
   for (proc = op.procs; *proc; proc++) {
-    ret = proc_whitelist_remove(abs(*proc), *proc > 0);
+    ret = trust_proc_remove(abs(*proc), *proc > 0);
     if (ret && ret != -ENOENT) {
-      pr_warn("%s: pid_whitelist_remove failed for proc=%d: %d\n", __func__,
-              *proc, ret);
+      pr_warn("%s: trust_proc_remove failed for proc=%d: %d\n", __func__, *proc,
+              ret);
       break;
     }
   }
@@ -597,28 +594,28 @@ int genl_core_init(genl_core_t **core) {
           .doit = genl_core_handle_get_file_stats,
       },
       {
-          .cmd = TCM_GENL_CMD_FILE_WHITELIST_ADD,
+          .cmd = TCM_GENL_CMD_TRUST_FILE_ADD,
           .policy = (*core)->policy,
           .maxattr = TCM_GENL_ATTR_MAX,
-          .doit = genl_core_handle_file_whitelist_add,
+          .doit = genl_core_handle_trust_file_add,
       },
       {
-          .cmd = TCM_GENL_CMD_FILE_WHITELIST_REMOVE,
+          .cmd = TCM_GENL_CMD_TRUST_FILE_REMOVE,
           .policy = (*core)->policy,
           .maxattr = TCM_GENL_ATTR_MAX,
-          .doit = genl_core_handle_file_whitelist_remove,
+          .doit = genl_core_handle_trust_file_remove,
       },
       {
-          .cmd = TCM_GENL_CMD_PROC_WHITELIST_ADD,
+          .cmd = TCM_GENL_CMD_TRUST_PROC_ADD,
           .policy = (*core)->policy,
           .maxattr = TCM_GENL_ATTR_MAX,
-          .doit = genl_core_handle_proc_whitelist_add,
+          .doit = genl_core_handle_trust_proc_add,
       },
       {
-          .cmd = TCM_GENL_CMD_PROC_WHITELIST_REMOVE,
+          .cmd = TCM_GENL_CMD_TRUST_PROC_REMOVE,
           .policy = (*core)->policy,
           .maxattr = TCM_GENL_ATTR_MAX,
-          .doit = genl_core_handle_proc_whitelist_remove,
+          .doit = genl_core_handle_trust_proc_remove,
       },
   };
 

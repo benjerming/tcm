@@ -49,14 +49,14 @@ const_u8_from_module!(pub(crate) tcm_genl_cmd::TCM_GENL_CMD_FILE_STATS_EVENT);
 pub(crate) const TCM_GENL_OP_LOGIN: u8 = bindings::tcm_genl_cmd::TCM_GENL_CMD_LOGIN as u8;
 pub(crate) const TCM_GENL_OP_GET_FILE_STATS: u8 =
     bindings::tcm_genl_cmd::TCM_GENL_CMD_GET_FILE_STATS as u8;
-pub(crate) const TCM_GENL_OP_FILE_WHITELIST_ADD: u8 =
-    bindings::tcm_genl_cmd::TCM_GENL_CMD_FILE_WHITELIST_ADD as u8;
-pub(crate) const TCM_GENL_OP_FILE_WHITELIST_REMOVE: u8 =
-    bindings::tcm_genl_cmd::TCM_GENL_CMD_FILE_WHITELIST_REMOVE as u8;
-pub(crate) const TCM_GENL_OP_PROC_WHITELIST_ADD: u8 =
-    bindings::tcm_genl_cmd::TCM_GENL_CMD_PROC_WHITELIST_ADD as u8;
-pub(crate) const TCM_GENL_OP_PROC_WHITELIST_REMOVE: u8 =
-    bindings::tcm_genl_cmd::TCM_GENL_CMD_PROC_WHITELIST_REMOVE as u8;
+pub(crate) const TCM_GENL_OP_TRUST_FILE_ADD: u8 =
+    bindings::tcm_genl_cmd::TCM_GENL_CMD_TRUST_FILE_ADD as u8;
+pub(crate) const TCM_GENL_OP_TRUST_FILE_REMOVE: u8 =
+    bindings::tcm_genl_cmd::TCM_GENL_CMD_TRUST_FILE_REMOVE as u8;
+pub(crate) const TCM_GENL_OP_TRUST_PROC_ADD: u8 =
+    bindings::tcm_genl_cmd::TCM_GENL_CMD_TRUST_PROC_ADD as u8;
+pub(crate) const TCM_GENL_OP_TRUST_PROC_REMOVE: u8 =
+    bindings::tcm_genl_cmd::TCM_GENL_CMD_TRUST_PROC_REMOVE as u8;
 
 pub(crate) const TCM_GENL_ATTR_KEY_MAX_LEN: usize = bindings::TCM_GENL_ATTR_KEY_MAX_LEN as usize;
 

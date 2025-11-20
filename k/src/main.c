@@ -12,7 +12,7 @@
 #include "tcm/genl.h"
 #include "tcm/kprobes/file.h"
 #include "tcm/kprobes/proc.h"
-#include "tcm/whitelist/file.h"
+#include "tcm/trust/file.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("TCM-Team");
@@ -78,7 +78,7 @@ module_param_cb(file_listener_stats, &file_listener_stats_param_ops, NULL,
 /* 执行实际的初始化逻辑，按依赖顺序创建各组件。 */
 static int tcm_init_impl(void) {
   int ret;
-  ret = file_whitelist_init();
+  ret = trust_file_init();
   if (ret) {
     return ret;
   }
@@ -115,7 +115,7 @@ static void tcm_exit_impl(void) {
   proc_listener_exit(&s_proc_listener);
   file_listener_exit(&s_file_listener);
   genl_core_exit(&s_genl_core);
-  file_whitelist_exit();
+  trust_file_exit();
 }
 
 static int __init tcm_init(void) {

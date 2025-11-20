@@ -1,6 +1,6 @@
-use std::convert::TryFrom;
-use std::mem;
-
+use super::attr::TcmAttr;
+use super::command::{TcmCommand, TcmEventCmd};
+use super::constants::{genl_family_name, genl_family_version};
 use genetlink::message::{RawGenlMessage, map_from_rawgenlmsg};
 use log::warn;
 use netlink_packet_core::{
@@ -8,10 +8,8 @@ use netlink_packet_core::{
     ParseableParametrized,
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader, GenlMessage};
-
-use super::attr::TcmAttr;
-use super::command::{TcmCommand, TcmEventCmd};
-use super::constants::{genl_family_name, genl_family_version};
+use std::convert::TryFrom;
+use std::mem;
 
 pub(crate) const FILE_LISTENER_PID_STAT_SIZE: usize = mem::size_of::<i32>() + mem::size_of::<u32>();
 

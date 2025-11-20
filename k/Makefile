@@ -6,8 +6,8 @@ tcm-y := src/main.o \
 	src/kprobes/core.o \
 	src/kprobes/file.o \
 	src/kprobes/proc.o \
-	src/whitelist/file.o \
-	src/whitelist/proc.o
+	src/trust/file.o \
+	src/trust/proc.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 MO ?= $(CURDIR)/build

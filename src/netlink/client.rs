@@ -1,3 +1,4 @@
+use crate::tcm::*;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use genetlink::GenetlinkHandle;
@@ -5,8 +6,6 @@ use netlink_packet_core::{
     NLM_F_ACK, NLM_F_REQUEST, NetlinkHeader, NetlinkMessage, NetlinkPayload,
 };
 use netlink_packet_generic::GenlMessage;
-
-use crate::tcm::*;
 
 pub struct TcmGenlClient {
     handle: GenetlinkHandle,
@@ -144,7 +143,7 @@ impl TcmGenlClient {
         S: AsRef<str>,
     {
         let entries = Self::collect_path_list(paths)?;
-        self.send_trust_path_list(entries, TcmOperateCmd::FileWhitelistAdd)
+        self.send_trust_path_list(entries, TcmOperateCmd::TrustFileAdd)
             .await
     }
 
@@ -158,33 +157,20 @@ impl TcmGenlClient {
         S: AsRef<str>,
     {
         let entries = Self::collect_path_list(paths)?;
-        self.send_trust_path_list(entries, TcmOperateCmd::FileWhitelistRemove)
+        self.send_trust_path_list(entries, TcmOperateCmd::TrustFileRemove)
             .await
     }
 
-    pub async fn put_trust_proc_list(
-        &mut self,
-        procs: Vec<i32>,
-        include_children: bool,
-    ) -> Result<()> {
-        let nlas = if include_children {
-            vec![TcmAttr::ProcList(procs)]
-        } else {
-            vec![TcmAttr::ProcList(procs.into_iter().map(|p| -p).collect())]
-        };
-        self.put(TcmOperateCmd::ProcWhitelistAdd, nlas)
+    pub async fn put_trust_proc_list(&mut self, procs: Vec<i32>) -> Result<()> {
+        let nlas = vec![TcmAttr::ProcList(procs)];
+        self.put(TcmOperateCmd::TrustProcAdd, nlas)
             .await
             .map(|_| ())
     }
 
-    pub async fn distrust_proc(&mut self, pid: i32, include_children: bool) -> Result<()> {
-        let mut nlas = Vec::with_capacity(2);
-        if include_children {
-            nlas.push(TcmAttr::ProcList(vec![pid]));
-        } else {
-            nlas.push(TcmAttr::ProcList(vec![-pid]));
-        }
-        self.put(TcmOperateCmd::ProcWhitelistRemove, nlas)
+    pub async fn distrust_proc(&mut self, pid: i32) -> Result<()> {
+        let nlas = vec![TcmAttr::ProcList(vec![pid])];
+        self.put(TcmOperateCmd::TrustProcRemove, nlas)
             .await
             .map(|_| ())
     }
