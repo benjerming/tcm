@@ -236,13 +236,29 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for TcmAttr {
             TCM_GENL_ATTR_FILE_EVENT_TYPE => Ok(TcmAttr::FileEventType(
                 Self::parse_u8(payload).context("failed to parse TCM_ATTR_FILE_EVENT_TYPE")?,
             )),
-            TCM_GENL_ATTR_KEY | TCM_GENL_ATTR_PATH1 | TCM_GENL_ATTR_PATH2 => {
+            TCM_GENL_ATTR_KEY => {
+                let len = payload
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(payload.len());
+                let value = String::from_utf8_lossy(&payload[..len]).into_owned();
+                Ok(TcmAttr::Key(value))
+            }
+            TCM_GENL_ATTR_PATH1 => {
                 let len = payload
                     .iter()
                     .position(|&b| b == 0)
                     .unwrap_or(payload.len());
                 let value = String::from_utf8_lossy(&payload[..len]).into_owned();
                 Ok(TcmAttr::Path1(value))
+            }
+            TCM_GENL_ATTR_PATH2 => {
+                let len = payload
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(payload.len());
+                let value = String::from_utf8_lossy(&payload[..len]).into_owned();
+                Ok(TcmAttr::Path2(value))
             }
             TCM_GENL_ATTR_FILE_STATS_PID_TABLE_SIZE => Ok(TcmAttr::FileStatsPidTableSize(
                 parse_u32(payload).context("failed to parse TCM_ATTR_FILE_STATS_PID_TABLE_SIZE")?,

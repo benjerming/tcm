@@ -1,15 +1,14 @@
 mod app;
 mod netlink;
+mod runtime;
 mod tcm;
 mod undo;
 
 use crate::app::App;
-use crate::netlink::*;
+use crate::runtime::{RuntimeBootstrap, bootstrap};
 use crate::tcm::*;
 use anyhow::{Context, Result};
-use genetlink::new_connection;
-use log::{debug, error, info, warn};
-use netlink_proto::sys::AsyncSocket;
+use log::{info, warn};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -17,56 +16,14 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     env_logger::init();
 
-    info!("resolving family info for TCM");
-    let family: crate::netlink::TcmFamilyInfo =
-        resolve_family_info(genl_family_name(), genl_family_version(), genl_mcgrp_name()).await?;
-    debug!("  resolved family info: {family:?}");
-
-    let (mut conn, handle, receiver) =
-        new_connection().context("failed to create generic netlink connection")?;
-
-    let mcgrp = genl_mcgrp_name();
-    info!("joining multicast group {mcgrp}");
-    conn.socket_mut()
-        .socket_mut()
-        .add_membership(family.gid)
-        .with_context(|| format!("failed to join multicast group {mcgrp}"))?;
-    debug!("  joined multicast group {mcgrp}");
-
-    let conn_task = tokio::spawn(async move {
-        info!("tokio spawn: receiving netlink messages");
-        conn.await;
-        info!("tokio spawn: finished receiving netlink messages");
-    });
-
-    info!("resolving TCM family id");
-    let resolved_family_id = handle
-        .resolve_family_id::<TcmPayload>()
-        .await
-        .context("failed to resolve TCM family id")?;
-    debug!("  resolved family id: {resolved_family_id}");
-
-    if family.family_id != resolved_family_id {
-        error!(
-            "warning: nlctrl reported family id {family:?} but resolver returned {resolved_family_id}",
-        );
-        return Err(anyhow::anyhow!(
-            "TCM family id mismatch: nlctrl reported {family:?} but resolver returned {resolved_family_id}"
-        ));
-    }
-
-    info!("ready: family info: {family:?}");
-
     let handler: Arc<dyn TcmEventHandler> = Arc::new(LoggingEventHandler);
-    let listener = TcmGenlBroadcastListener::spawn(receiver, {
-        let handler = Arc::clone(&handler);
-        move |msg| {
-            handle_raw_message(msg, handler.as_ref());
-        }
-    });
-    info!("kernel broadcast listener initialized (开启监听，但默认禁用回调)");
+    let runtime = bootstrap(Arc::clone(&handler)).await?;
+    let RuntimeBootstrap {
+        mut client,
+        listener,
+        guard,
+    } = runtime;
 
-    let mut client = TcmGenlClient::new(handle, family.family_id);
     let auth_key = std::env::var("TCM_AUTH_KEY").unwrap_or_else(|_| {
         warn!("TCM_AUTH_KEY 未设置，将使用默认测试密钥");
         "1234567890".to_owned()
@@ -80,9 +37,7 @@ async fn main() -> Result<()> {
     app.run().await?;
 
     let listener = app.into_listener();
-    listener.shutdown().await;
-    conn_task.abort();
-    let _ = conn_task.await;
+    guard.shutdown(listener).await;
 
     info!("userspace listener terminated");
     Ok(())
