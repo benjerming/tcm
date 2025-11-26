@@ -2,6 +2,7 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
+#include <linux/mm.h>
 #include <linux/moduleparam.h>
 #include <linux/pid.h>
 #include <linux/rbtree.h>
@@ -18,17 +19,14 @@
  * PROC 白名单：
  *  - 使用树结构模拟当前（添加时观察到的）进程树
  *  - 支持标记是否对子进程生效，默认继承
- *  - module_param 提供树形字符串表示，兼容旧的逗号列表
+ *  - module_param 提供树形字符串表示
  */
 
-#define TRUST_PROC_MAX_EXPLICIT 128
-#define TRUST_PROC_PARAM_LEN 4096
-#define TRUST_PROC_LINEAGE_MAX 64
 
 struct trust_proc_node {
   pid_t pid;
   bool is_explicit;
-  bool include_children;
+  bool is_tree;
   struct trust_proc_node *parent;
   struct rb_node rb;
   struct list_head sibling;
@@ -37,24 +35,23 @@ struct trust_proc_node {
 
 struct trust_proc_parsed_node {
   pid_t pid;
-  bool include_children;
+  bool is_tree;
   bool is_explicit;
   struct list_head sibling;
   struct list_head children;
 };
 
 static DEFINE_RWLOCK(g_rwlock);
-static struct rb_root g_trust_proc_index = RB_ROOT;
-static LIST_HEAD(g_trust_proc_roots);
-static size_t g_trust_proc_explicit_count;
-static size_t g_trust_proc_node_count;
-static char g_trust_proc_raw[TRUST_PROC_PARAM_LEN];
+static struct rb_root g_trust_proc_root = RB_ROOT;
 
-/* 解析用户输入的 PID 列表，自动去重并限制数量。 */
-static int parse_proc_list(char *input, pid_t *out, size_t max, size_t *count) {
+/* 解析用户输入的 PID 列表，自动去重。 */
+static int parse_proc_list(char *input, pid_t **out, size_t *count) {
   char *cursor;
   char *token;
   size_t idx = 0;
+  size_t capacity = 0;
+  pid_t *buffer = NULL;
+  int ret = 0;
 
   if (!out || !count || !input) {
     return -EINVAL;
@@ -64,7 +61,6 @@ static int parse_proc_list(char *input, pid_t *out, size_t max, size_t *count) {
 
   while ((token = strsep(&cursor, ", \t")) != NULL) {
     long value;
-    int ret;
     bool exists = false;
     size_t i;
 
@@ -74,15 +70,16 @@ static int parse_proc_list(char *input, pid_t *out, size_t max, size_t *count) {
 
     ret = kstrtol(token, 10, &value);
     if (ret) {
-      return ret;
+      goto err_out;
     }
 
     if (value < 0 || value > PID_MAX_LIMIT) {
-      return -ERANGE;
+      ret = -ERANGE;
+      goto err_out;
     }
 
     for (i = 0; i < idx; ++i) {
-      if (out[i] == (pid_t)value) {
+      if (buffer[i] == (pid_t)value) {
         exists = true;
         break;
       }
@@ -92,19 +89,43 @@ static int parse_proc_list(char *input, pid_t *out, size_t max, size_t *count) {
       continue;
     }
 
-    if (idx >= max) {
-      return -E2BIG;
+    if (idx == capacity) {
+      size_t new_capacity;
+      pid_t *tmp;
+
+      if (capacity == 0) {
+        new_capacity = 16;
+      } else if (capacity >= PID_MAX_LIMIT) {
+        ret = -E2BIG;
+        goto err_out;
+      } else {
+        new_capacity = min_t(size_t, capacity * 2, (size_t)PID_MAX_LIMIT);
+      }
+
+      tmp = krealloc_array(buffer, new_capacity, sizeof(pid_t), GFP_KERNEL);
+      if (!tmp) {
+        ret = -ENOMEM;
+        goto err_out;
+      }
+      buffer = tmp;
+      capacity = new_capacity;
     }
 
-    out[idx++] = (pid_t)value;
+    buffer[idx++] = (pid_t)value;
   }
 
   *count = idx;
+  *out = buffer;
   return 0;
+
+err_out:
+  kfree(buffer);
+  *out = NULL;
+  return ret;
 }
 
 static struct trust_proc_node *trust_proc_lookup_locked(pid_t pid) {
-  struct rb_node *node = g_trust_proc_index.rb_node;
+  struct rb_node *node = g_trust_proc_root.rb_node;
 
   while (node) {
     struct trust_proc_node *entry = rb_entry(node, struct trust_proc_node, rb);
@@ -121,7 +142,7 @@ static struct trust_proc_node *trust_proc_lookup_locked(pid_t pid) {
 }
 
 static int trust_proc_insert_node_locked(struct trust_proc_node *node) {
-  struct rb_node **link = &g_trust_proc_index.rb_node;
+  struct rb_node **link = &g_trust_proc_root.rb_node;
   struct rb_node *parent = NULL;
 
   while (*link) {
@@ -137,7 +158,7 @@ static int trust_proc_insert_node_locked(struct trust_proc_node *node) {
   }
 
   rb_link_node(&node->rb, parent, link);
-  rb_insert_color(&node->rb, &g_trust_proc_index);
+  rb_insert_color(&node->rb, &g_trust_proc_root);
   return 0;
 }
 
@@ -151,7 +172,7 @@ static struct trust_proc_node *trust_proc_create_node(pid_t pid) {
 
   node->pid = pid;
   node->is_explicit = false;
-  node->include_children = true;
+  node->is_tree = true;
   node->parent = NULL;
   INIT_LIST_HEAD(&node->sibling);
   INIT_LIST_HEAD(&node->children);
@@ -169,8 +190,6 @@ static void trust_proc_attach_node_locked(struct trust_proc_node *node,
   node->parent = parent;
   if (parent) {
     list_add_tail(&node->sibling, &parent->children);
-  } else {
-    list_add_tail(&node->sibling, &g_trust_proc_roots);
   }
 }
 
@@ -185,35 +204,31 @@ static void trust_proc_free_node_recursive(struct trust_proc_node *node) {
     trust_proc_free_node_recursive(child);
   }
 
-  rb_erase(&node->rb, &g_trust_proc_index);
+  rb_erase(&node->rb, &g_trust_proc_root);
   list_del_init(&node->sibling);
   INIT_LIST_HEAD(&node->children);
   kfree(node);
 }
 
 static void trust_proc_clear_locked(void) {
-  struct trust_proc_node *node, *tmp;
+  struct rb_node *rbnode;
 
-  list_for_each_entry_safe(node, tmp, &g_trust_proc_roots, sibling) {
+  while ((rbnode = rb_first(&g_trust_proc_root)) != NULL) {
+    struct trust_proc_node *node =
+        rb_entry(rbnode, struct trust_proc_node, rb);
     trust_proc_free_node_recursive(node);
   }
-
-  g_trust_proc_explicit_count = 0;
-  g_trust_proc_node_count = 0;
-  g_trust_proc_raw[0] = '\0';
 }
 
+/* 修剪白名单树。 */
 static void trust_proc_prune_locked(struct trust_proc_node *node) {
   struct trust_proc_node *parent;
 
   while (node && !node->is_explicit && list_empty(&node->children)) {
     parent = node->parent;
-    rb_erase(&node->rb, &g_trust_proc_index);
+    rb_erase(&node->rb, &g_trust_proc_root);
     list_del_init(&node->sibling);
     kfree(node);
-    if (g_trust_proc_node_count > 0) {
-      g_trust_proc_node_count--;
-    }
     node = parent;
   }
 }
@@ -257,7 +272,7 @@ static int trust_proc_format_node(struct trust_proc_node *node, char *buffer,
   }
 
   ret = trust_proc_append(buffer, buflen, offset, "%d%s%s", node->pid,
-                          node->include_children ? "*" : "!",
+                          node->is_tree ? "*" : "!",
                           node->is_explicit ? "" : "?");
   if (ret) {
     return ret;
@@ -286,26 +301,8 @@ static int trust_proc_format_node(struct trust_proc_node *node, char *buffer,
   return 0;
 }
 
-static void trust_proc_refresh_string_locked(void) {
-  struct trust_proc_node *node;
-  size_t offset = 0;
-  bool first = true;
-  int ret;
-
-  g_trust_proc_raw[0] = '\0';
-
-  list_for_each_entry(node, &g_trust_proc_roots, sibling) {
-    ret = trust_proc_format_node(node, g_trust_proc_raw,
-                                 sizeof(g_trust_proc_raw), &offset, first);
-    if (ret) {
-      strscpy(g_trust_proc_raw, "<truncated>", sizeof(g_trust_proc_raw));
-      return;
-    }
-    first = false;
-  }
-}
-
-static bool trust_proc_node_allows(struct trust_proc_node *node) {
+/* 检查进程是否在白名单中。 */
+static bool trust_proc_node_contains(struct trust_proc_node *node) {
   bool is_self = true;
 
   while (node) {
@@ -313,7 +310,7 @@ static bool trust_proc_node_allows(struct trust_proc_node *node) {
       if (is_self) {
         return true;
       }
-      if (node->include_children) {
+      if (node->is_tree) {
         return true;
       }
     }
@@ -324,12 +321,12 @@ static bool trust_proc_node_allows(struct trust_proc_node *node) {
   return false;
 }
 
-static int trust_proc_collect_lineage(pid_t pid, pid_t *lineage,
-                                      size_t *depth) {
+/* 统计 lineage 深度，避免在 RCU 临界区内分配内存。 */
+static int trust_proc_measure_lineage_depth(pid_t pid, size_t *depth) {
   struct task_struct *task;
   size_t count = 0;
 
-  if (!lineage || !depth) {
+  if (!depth) {
     return -EINVAL;
   }
 
@@ -340,8 +337,64 @@ static int trust_proc_collect_lineage(pid_t pid, pid_t *lineage,
     return -ESRCH;
   }
 
-  while (task && count < TRUST_PROC_LINEAGE_MAX) {
-    lineage[count++] = task_pid_nr(task);
+  while (task) {
+    count++;
+    if (task->pid == 0 || task == task->real_parent) {
+      break;
+    }
+    task = rcu_dereference(task->real_parent);
+    if (count >= PID_MAX_LIMIT) {
+      rcu_read_unlock();
+      return -E2BIG;
+    }
+  }
+
+  rcu_read_unlock();
+  *depth = count;
+  return 0;
+}
+
+/* 收集进程的 lineage，即从当前进程到根进程的路径。 */
+static int trust_proc_collect_lineage(pid_t pid, pid_t **lineage,
+                                      size_t *depth) {
+  struct task_struct *task;
+  pid_t *buffer = NULL;
+  size_t capacity = 0;
+  size_t count = 0;
+  int ret;
+
+  if (!lineage || !depth) {
+    return -EINVAL;
+  }
+
+  *lineage = NULL;
+  ret = trust_proc_measure_lineage_depth(pid, &capacity);
+  if (ret) {
+    return ret;
+  }
+
+  if (!capacity) {
+    *lineage = NULL;
+    *depth = 0;
+    return -ESRCH;
+  }
+
+  buffer = kcalloc(capacity, sizeof(pid_t), GFP_KERNEL);
+  if (!buffer) {
+    return -ENOMEM;
+  }
+
+  rcu_read_lock();
+  task = pid_task(find_vpid(pid), PIDTYPE_PID);
+  if (!task) {
+    rcu_read_unlock();
+    kfree(buffer);
+    *lineage = NULL;
+    return -ESRCH;
+  }
+
+  while (task && count < capacity) {
+    buffer[count++] = task_pid_nr(task);
     if (task->pid == 0 || task == task->real_parent) {
       break;
     }
@@ -349,17 +402,27 @@ static int trust_proc_collect_lineage(pid_t pid, pid_t *lineage,
   }
   rcu_read_unlock();
 
-  if (count >= TRUST_PROC_LINEAGE_MAX && lineage[count - 1] != 0 &&
-      lineage[count - 1] != 1) {
-    return -E2BIG;
+  if (count == 0) {
+    kfree(buffer);
+    *lineage = NULL;
+    return -ESRCH;
   }
 
+  if (count < capacity) {
+    pid_t *shrunk = krealloc_array(buffer, count, sizeof(pid_t), GFP_KERNEL);
+    if (shrunk) {
+      buffer = shrunk;
+    }
+  }
+
+  *lineage = buffer;
   *depth = count;
   return 0;
 }
 
+/* 更新或插入进程链。 */
 static int trust_proc_upsert_chain_locked(const pid_t *lineage, size_t depth,
-                                          bool include_children) {
+                                          bool is_tree) {
   struct trust_proc_node *parent = NULL;
   struct trust_proc_node *node = NULL;
   size_t idx;
@@ -369,30 +432,29 @@ static int trust_proc_upsert_chain_locked(const pid_t *lineage, size_t depth,
     return -EINVAL;
   }
 
-  node = trust_proc_lookup_locked(lineage[0]);
-  if ((!node || !node->is_explicit) &&
-      g_trust_proc_explicit_count >= TRUST_PROC_MAX_EXPLICIT) {
-    return -E2BIG;
-  }
-
   for (idx = depth; idx-- > 0;) {
+    /* 从 lineage 的末尾(根进程)开始，逐个处理每个进程。 */
     pid_t current_pid = lineage[idx];
     node = trust_proc_lookup_locked(current_pid);
     if (!node) {
+      /* 如果进程不存在，则创建新的节点。 */
       node = trust_proc_create_node(current_pid);
       if (!node) {
         return -ENOMEM;
       }
+      /* 将新节点插入红黑树。 */
       ret = trust_proc_insert_node_locked(node);
       if (ret) {
         kfree(node);
         return ret;
       }
+      /* 将新节点挂载到父节点。 */
       trust_proc_attach_node_locked(node, parent);
-      g_trust_proc_node_count++;
     } else if (node->parent != parent) {
+      /* 如果进程已存在，则将其挂载到父节点。 */
       trust_proc_attach_node_locked(node, parent);
     }
+    /* 更新父节点。 */
     parent = node;
   }
 
@@ -400,14 +462,10 @@ static int trust_proc_upsert_chain_locked(const pid_t *lineage, size_t depth,
     return -EINVAL;
   }
 
-  if (!node->is_explicit) {
-    if (g_trust_proc_explicit_count >= TRUST_PROC_MAX_EXPLICIT) {
-      return -E2BIG;
-    }
-    node->is_explicit = true;
-    g_trust_proc_explicit_count++;
-  }
-  node->include_children = include_children;
+  /* 标记进程为显式添加。 */
+  node->is_explicit = true;
+  /* 设置是否将进程组内的所有进程都添加到白名单。 */
+  node->is_tree = is_tree;
 
   return 0;
 }
@@ -447,8 +505,7 @@ static int trust_proc_parse_number(const char **cursor, pid_t *pid) {
 }
 
 static struct trust_proc_parsed_node *
-trust_proc_alloc_parsed_node(pid_t pid, bool include_children,
-                             bool is_explicit) {
+trust_proc_alloc_parsed_node(pid_t pid, bool is_tree, bool is_explicit) {
   struct trust_proc_parsed_node *node;
 
   node = kzalloc(sizeof(*node), GFP_KERNEL);
@@ -457,7 +514,7 @@ trust_proc_alloc_parsed_node(pid_t pid, bool include_children,
   }
 
   node->pid = pid;
-  node->include_children = include_children;
+  node->is_tree = is_tree;
   node->is_explicit = is_explicit;
   INIT_LIST_HEAD(&node->sibling);
   INIT_LIST_HEAD(&node->children);
@@ -496,7 +553,7 @@ static int trust_proc_parse_node(const char **cursor, size_t depth,
                                  struct trust_proc_parsed_node **out,
                                  size_t *explicit_count) {
   struct trust_proc_parsed_node *node = NULL;
-  bool include_children = true;
+  bool is_tree = true;
   bool is_explicit = true;
   pid_t pid;
   int ret;
@@ -505,7 +562,7 @@ static int trust_proc_parse_node(const char **cursor, size_t depth,
     return -EINVAL;
   }
 
-  if (depth >= TRUST_PROC_LINEAGE_MAX) {
+  if (depth >= PID_MAX_LIMIT) {
     return -E2BIG;
   }
 
@@ -516,7 +573,7 @@ static int trust_proc_parse_node(const char **cursor, size_t depth,
 
   trust_proc_skip_spaces(cursor);
   if (**cursor == '*' || **cursor == '!') {
-    include_children = (**cursor == '*');
+    is_tree = (**cursor == '*');
     (*cursor)++;
   }
 
@@ -526,7 +583,7 @@ static int trust_proc_parse_node(const char **cursor, size_t depth,
     (*cursor)++;
   }
 
-  node = trust_proc_alloc_parsed_node(pid, include_children, is_explicit);
+  node = trust_proc_alloc_parsed_node(pid, is_tree, is_explicit);
   if (!node) {
     return -ENOMEM;
   }
@@ -631,7 +688,7 @@ trust_proc_apply_parsed_node_locked(struct trust_proc_parsed_node *parsed,
   }
 
   node->is_explicit = parsed->is_explicit;
-  node->include_children = parsed->include_children;
+  node->is_tree = parsed->is_tree;
 
   ret = trust_proc_insert_node_locked(node);
   if (ret) {
@@ -639,10 +696,6 @@ trust_proc_apply_parsed_node_locked(struct trust_proc_parsed_node *parsed,
     return ret;
   }
   trust_proc_attach_node_locked(node, parent);
-  g_trust_proc_node_count++;
-  if (node->is_explicit) {
-    g_trust_proc_explicit_count++;
-  }
 
   list_for_each_entry(child, &parsed->children, sibling) {
     ret = trust_proc_apply_parsed_node_locked(child, node);
@@ -668,71 +721,67 @@ static int trust_proc_apply_parsed_roots_locked(struct list_head *roots) {
   return 0;
 }
 
-int trust_proc_add(pid_t pid, bool include_children) {
-  pid_t lineage[TRUST_PROC_LINEAGE_MAX];
+/* 添加进程[组]到白名单。 */
+int trust_proc_add(pid_t pid, bool is_tree) {
+  pid_t *lineage = NULL;
   size_t depth = 0;
   int ret;
 
   if (pid <= 0 || pid > PID_MAX_LIMIT) {
+    pr_warn("trust_proc: invalid pid=%d\n", pid);
     return -EINVAL;
   }
 
-  ret = trust_proc_collect_lineage(pid, lineage, &depth);
+  ret = trust_proc_collect_lineage(pid, &lineage, &depth);
   if (ret) {
     return ret;
   }
 
   write_lock(&g_rwlock);
-  ret = trust_proc_upsert_chain_locked(lineage, depth, include_children);
+  ret = trust_proc_upsert_chain_locked(lineage, depth, is_tree);
   if (!ret) {
-    trust_proc_refresh_string_locked();
-    pr_info("trust_proc: added pid=%d inherit_children=%d (count=%zu)\n", pid,
-            include_children, g_trust_proc_explicit_count);
+    pr_info("trust_proc: added pid=%d %s\n", pid, is_tree ? "*" : "");
   }
   write_unlock(&g_rwlock);
-
+  kfree(lineage);
   return ret;
 }
 
-int trust_proc_remove(pid_t pid, bool include_children) {
+/* 将进程[组]从白名单中移除。 */
+int trust_proc_remove(pid_t pid, bool is_tree) {
   struct trust_proc_node *node;
   int ret = 0;
 
   if (pid <= 0 || pid > PID_MAX_LIMIT) {
+    pr_warn("trust_proc: invalid pid=%d\n", pid);
     return -EINVAL;
   }
 
   write_lock(&g_rwlock);
   node = trust_proc_lookup_locked(pid);
   if (!node || !node->is_explicit) {
+    pr_warn("trust_proc: pid=%d not found\n", pid);
     ret = -ENOENT;
     goto out_unlock;
   }
 
-  if (node->include_children != include_children) {
-    ret = -EINVAL;
-    goto out_unlock;
-  }
-
   node->is_explicit = false;
-  if (g_trust_proc_explicit_count > 0) {
-    g_trust_proc_explicit_count--;
-  }
+  node->is_tree = false;
+
   trust_proc_prune_locked(node);
-  trust_proc_refresh_string_locked();
-  pr_info("trust_proc: removed pid=%d inherit_children=%d (count=%zu)\n", pid,
-          include_children, g_trust_proc_explicit_count);
+  pr_info("trust_proc: removed pid=%d %s\n", pid, is_tree ? "*" : "");
 
 out_unlock:
   write_unlock(&g_rwlock);
   return ret;
 }
 
+/* 查询白名单，监听器会跳过这些 PID。 */
 bool trust_proc_contains(pid_t pid) {
   struct trust_proc_node *node;
-  pid_t lineage[TRUST_PROC_LINEAGE_MAX];
+  pid_t *lineage = NULL;
   size_t depth = 0;
-  bool allowed = false;
+  bool contains = false;
   int ret;
   size_t i;
 
@@ -743,15 +792,16 @@ bool trust_proc_contains(pid_t pid) {
   read_lock(&g_rwlock);
   node = trust_proc_lookup_locked(pid);
   if (node) {
-    allowed = trust_proc_node_allows(node);
+    contains = trust_proc_node_contains(node);
   }
   read_unlock(&g_rwlock);
 
-  if (allowed) {
+  if (contains) {
     return true;
   }
 
-  ret = trust_proc_collect_lineage(pid, lineage, &depth);
+  /* 如果进程不在白名单中，则检查其祖先进程是否在白名单中。 */
+  ret = trust_proc_collect_lineage(pid, &lineage, &depth);
   if (ret) {
     return false;
   }
@@ -762,36 +812,25 @@ bool trust_proc_contains(pid_t pid) {
     if (!ancestor || !ancestor->is_explicit) {
       continue;
     }
-    if (i == 0 || ancestor->include_children) {
-      allowed = true;
+    if (i == 0 || ancestor->is_tree) {
+      contains = true;
       break;
     }
   }
   read_unlock(&g_rwlock);
 
-  return allowed;
+  kfree(lineage);
+  return contains;
 }
 
 static int trust_proc_apply_flat_list(const pid_t *pids, size_t count) {
   struct trust_proc_lineage_cache {
-    pid_t lineage[TRUST_PROC_LINEAGE_MAX];
+    pid_t *lineage;
     size_t depth;
   };
   struct trust_proc_lineage_cache *cache;
   size_t i;
   int ret = 0;
-
-  if (count > TRUST_PROC_MAX_EXPLICIT) {
-    return -E2BIG;
-  }
-
-  if (count == 0) {
-    write_lock(&g_rwlock);
-    trust_proc_clear_locked();
-    trust_proc_refresh_string_locked();
-    write_unlock(&g_rwlock);
-    return 0;
-  }
 
   cache = kcalloc(count, sizeof(*cache), GFP_KERNEL);
   if (!cache) {
@@ -799,29 +838,31 @@ static int trust_proc_apply_flat_list(const pid_t *pids, size_t count) {
   }
 
   for (i = 0; i < count; ++i) {
-    ret =
-        trust_proc_collect_lineage(pids[i], cache[i].lineage, &cache[i].depth);
+    cache[i].lineage = NULL;
+  }
+
+  for (i = 0; i < count; ++i) {
+    ret = trust_proc_collect_lineage(pids[i], &cache[i].lineage,
+                                     &cache[i].depth);
     if (ret) {
-      kfree(cache);
-      return ret;
+      goto out_free;
     }
   }
 
   write_lock(&g_rwlock);
-  trust_proc_clear_locked();
   for (i = 0; i < count; ++i) {
     ret =
         trust_proc_upsert_chain_locked(cache[i].lineage, cache[i].depth, true);
     if (ret) {
-      trust_proc_clear_locked();
       break;
     }
   }
-  if (!ret) {
-    trust_proc_refresh_string_locked();
-  }
   write_unlock(&g_rwlock);
 
+out_free:
+  for (i = 0; i < count; ++i) {
+    kfree(cache[i].lineage);
+  }
   kfree(cache);
   return ret;
 }
@@ -829,7 +870,6 @@ static int trust_proc_apply_flat_list(const pid_t *pids, size_t count) {
 static int trust_proc_apply_tree_string(char *input) {
   LIST_HEAD(parsed_roots);
   size_t explicit_count = 0;
-  size_t final_count = 0;
   int ret;
 
   ret = trust_proc_parse_tree(input, &parsed_roots, &explicit_count);
@@ -838,25 +878,17 @@ static int trust_proc_apply_tree_string(char *input) {
     return ret;
   }
 
-  if (explicit_count > TRUST_PROC_MAX_EXPLICIT) {
-    trust_proc_free_parsed_tree(&parsed_roots);
-    return -E2BIG;
-  }
-
   write_lock(&g_rwlock);
   trust_proc_clear_locked();
   ret = trust_proc_apply_parsed_roots_locked(&parsed_roots);
   if (ret) {
     trust_proc_clear_locked();
-  } else {
-    trust_proc_refresh_string_locked();
-    final_count = g_trust_proc_explicit_count;
   }
   write_unlock(&g_rwlock);
 
   trust_proc_free_parsed_tree(&parsed_roots);
   if (!ret) {
-    pr_info("trust_proc: updated (%zu entries)\n", final_count);
+    pr_info("trust_proc: updated (%zu entries)\n", explicit_count);
   }
   return ret;
 }
@@ -874,17 +906,15 @@ static int trust_proc_param_set(const char *val,
     return -EINVAL;
   }
 
-  buf = kcalloc(TRUST_PROC_PARAM_LEN, sizeof(char), GFP_KERNEL);
+  buf = kstrdup(val, GFP_KERNEL);
   if (!buf) {
     return -ENOMEM;
   }
 
-  strscpy(buf, val, TRUST_PROC_PARAM_LEN);
   trimmed = strim(buf);
   if (!trimmed || !*trimmed) {
     write_lock(&g_rwlock);
     trust_proc_clear_locked();
-    trust_proc_refresh_string_locked();
     write_unlock(&g_rwlock);
     pr_info("trust_proc: cleared\n");
     kfree(buf);
@@ -898,13 +928,7 @@ static int trust_proc_param_set(const char *val,
     return ret;
   }
 
-  parsed = kcalloc(TRUST_PROC_MAX_EXPLICIT, sizeof(*parsed), GFP_KERNEL);
-  if (!parsed) {
-    kfree(buf);
-    return -ENOMEM;
-  }
-
-  ret = parse_proc_list(trimmed, parsed, TRUST_PROC_MAX_EXPLICIT, &count);
+  ret = parse_proc_list(trimmed, &parsed, &count);
   kfree(buf);
   if (ret) {
     kfree(parsed);
@@ -920,21 +944,52 @@ static int trust_proc_param_set(const char *val,
 }
 
 static int trust_proc_param_get(char *buffer, const struct kernel_param *kp) {
-  int len;
+  size_t offset = 0;
+  bool first = true;
+  int ret = 0;
+  struct rb_node *rbnode;
+  size_t buflen = PAGE_SIZE;
 
   if (!buffer) {
     return -EINVAL;
   }
 
+  buffer[0] = '\0';
+
   read_lock(&g_rwlock);
-  if (g_trust_proc_raw[0] == '\0') {
-    len = scnprintf(buffer, PAGE_SIZE, "\n");
-  } else {
-    len = scnprintf(buffer, PAGE_SIZE, "%s\n", g_trust_proc_raw);
+  rbnode = rb_first(&g_trust_proc_root);
+  while (rbnode) {
+    struct trust_proc_node *node =
+        rb_entry(rbnode, struct trust_proc_node, rb);
+
+    if (!node->parent) {
+      ret = trust_proc_format_node(node, buffer, buflen, &offset, first);
+      if (ret) {
+        break;
+      }
+      first = false;
+    }
+    rbnode = rb_next(rbnode);
   }
   read_unlock(&g_rwlock);
 
-  return len;
+  if (ret) {
+    if (buflen) {
+      buffer[min(offset, buflen - 1)] = '\0';
+    }
+    return ret;
+  }
+
+  if (offset >= buflen) {
+    if (buflen) {
+      buffer[buflen - 1] = '\0';
+      return buflen - 1;
+    }
+    return 0;
+  }
+
+  buffer[offset] = '\0';
+  return offset;
 }
 
 static const struct kernel_param_ops trust_proc_ops = {

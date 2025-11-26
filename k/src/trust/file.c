@@ -17,8 +17,6 @@
  *  - 使用读写锁保护并发访问，并限制最大允许条目数量
  */
 
-#define TRUST_FILE_MAX 256
-
 enum trust_file_node_type {
   TRUST_FILE_NODE_DIR = 0,
   TRUST_FILE_NODE_FILE = 1,
@@ -443,10 +441,6 @@ int trust_file_add(const char *path) {
       ret = 0;
       goto out_unlock;
     }
-    if (trust_file_count >= TRUST_FILE_MAX) {
-      ret = -E2BIG;
-      goto out_unlock;
-    }
     trust_file_root->is_trust_entry = true;
     trust_file_count++;
     pr_info("trust_file: added directory \"/\" (count=%zu)\n",
@@ -505,11 +499,6 @@ int trust_file_add(const char *path) {
   if (node->is_trust_entry) {
     ret = 0;
     goto out_unlock;
-  }
-
-  if (trust_file_count >= TRUST_FILE_MAX) {
-    ret = -E2BIG;
-    goto rollback;
   }
 
   node->is_trust_entry = true;

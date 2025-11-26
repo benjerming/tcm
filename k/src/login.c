@@ -86,15 +86,16 @@ static int login_manager_clients_remove(login_manager_t *manager, pid_t pid) {
     return -EINVAL;
   }
   spin_lock_irqsave(&manager->clients_lock, flags);
-  if (!login_manager_clients_contains_locked(manager, pid)) {
-    spin_unlock_irqrestore(&manager->clients_lock, flags);
-    return -ENOENT;
+  list_for_each_entry(client, &manager->clients, node) {
+    if (client->pid == pid) {
+      list_del(&client->node);
+      kfree(client);
+      spin_unlock_irqrestore(&manager->clients_lock, flags);
+      return 0;
+    }
   }
-  client = list_first_entry(&manager->clients, client_node_t, node);
-  list_del(&client->node);
-  kfree(client);
   spin_unlock_irqrestore(&manager->clients_lock, flags);
-  return 0;
+  return -ENOENT;
 }
 
 int login_manager_login(login_manager_t *manager, pid_t pid,
